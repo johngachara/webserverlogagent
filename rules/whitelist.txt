@@ -1,0 +1,12 @@
+# Internal network ranges
+192.168.1.0/24
+10.0.0.0/8
+172.16.0.0/12
+
+# Known good service IPs
+8.8.8.8
+8.8.4.4
+1.1.1.1
+
+# CDN and monitoring services
+# Add your legitimate scanner/monitoring IPs here

@@ -1,0 +1,12 @@
+services:
+  logagent:
+    build : .
+    volumes:
+      - .:/logagent
+      - ./config.yaml:/logagent/config.yaml:ro
+      - /var/log:/var/log:ro
+
+    env_file:
+      - .env
+
+
