@@ -1,5 +1,4 @@
-const axios = require('axios');
-
+import axios from "axios";
 class IntelChecker {
     constructor() {
         this.virusTotalKey = process.env.VIRUSTOTALKEY;
@@ -207,4 +206,4 @@ class IntelChecker {
 
 }
 
-module.exports = IntelChecker;
+export default IntelChecker;

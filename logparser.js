@@ -1,8 +1,8 @@
-// Enhanced log parser supporting multiple formats
-const fs = require('fs');
-const chokidar = require('chokidar');
-const { EventEmitter } = require('events');
+import fs from 'fs';
+import chokidar from 'chokidar';
+import { EventEmitter } from 'events';
 
+// Enhanced log parser supporting multiple formats
 class LogParser extends EventEmitter {
     constructor(logPaths, onLogEntry, options = {}) {
         super();
@@ -62,7 +62,14 @@ class LogParser extends EventEmitter {
                 regex: /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) (\S+) (\S+) (\S+) (\d+) (\S+) (\S+) (\d+) (\d+) (\d+) (\d+) (\d+) (\S+) (\S+) (\S+) (\S+)$/,
                 fields: ['date', 'time', 'serverIp', 'method', 'uri', 'query', 'port', 'username', 'clientIp', 'userAgent', 'referer', 'status', 'substatus', 'win32Status', 'timeTaken'],
                 timestampFormat: 'iis'
+            },
+            {
+                name: 'apache_variant_for_logagent',
+                regex: /^(\S+) - - \[([^\]]+)] "(\S+) ([^"]+)" (\d+) "([^"]+)" "([^"]+)"$/,
+                fields: ['ip', 'timestamp', 'method', 'url', 'status', 'userAgent', 'referer'],
+                timestampFormat: 'apache'
             }
+
         ];
 
         // Add custom patterns if provided
@@ -290,4 +297,4 @@ class LogParser extends EventEmitter {
     }
 }
 
-module.exports = LogParser;
+export default LogParser;

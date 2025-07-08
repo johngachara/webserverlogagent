@@ -3,5 +3,7 @@ config.yaml
 node_modules
 groq.js
 agent.log
+.dockerignore
+logs
 .env
 pushover_stats.json

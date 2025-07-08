@@ -1,6 +1,7 @@
+import fs from 'fs';
+import path from 'path';
+
 // Rule-based detection
-const fs = require('fs');
-const path = require('path');
 
 class ThreatDetector {
     constructor(thresholds) {
@@ -185,4 +186,4 @@ class ThreatDetector {
     }
 }
 
-module.exports = ThreatDetector;
+export default ThreatDetector;

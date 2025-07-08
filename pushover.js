@@ -1,11 +1,11 @@
-const pushover = require('pushover-notifications');
-const moment = require('moment');
-const fs = require('fs').promises;
-const path = require('path');
+import Push from 'pushover-notifications';
+import moment from 'moment';
+import { promises as fs } from 'fs';
+import path from 'path';
 
 class PushoverNotifier {
     constructor(userKey, appToken, options = {}) {
-        this.push = new pushover({
+        this.push = new Push({
             user: userKey,
             token: appToken,
             // Optional: set default device if you want to target specific devices
@@ -245,7 +245,7 @@ class PushoverNotifier {
         if (threatResult.llmAnalysis) {
             html += `<br><b>AI Analysis:</b> ${this.escapeHtml(threatResult.llmAnalysis.explanation)}<br>`;
             if (threatResult.llmAnalysis.attackType) {
-                html += `<b>Attack Type:</b> ${threatResult.llmAnalysis.attackType}<br>`;
+                html += `<b>Attack Type:</b> ${this.escapeHtml(threatResult.llmAnalysis.attackType)}<br>`;
             }
         }
 
@@ -798,4 +798,4 @@ class PushoverNotifier {
     }
 }
 
-module.exports = PushoverNotifier;
+export default PushoverNotifier;
