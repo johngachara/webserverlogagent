@@ -12,6 +12,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.54.0",
     "@supabase/supabase-js": "^2.50.3",
+    "@upstash/redis": "^1.35.1",
     "axios": "^1.10.0",
     "chokidar": "^3.6.0",
     "groq-sdk": "^0.25.0",

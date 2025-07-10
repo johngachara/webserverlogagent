@@ -20,7 +20,6 @@ class LogSecurityAgent {
         this.initializeComponents();
         this.threatQueue = [];
         this.isProcessing = false;
-        this.maxQueueSize = this.config.max_queue_size || 1000;
     }
 
     /**
@@ -81,13 +80,7 @@ class LogSecurityAgent {
 
             // Only proceed if initial detection finds potential threats OR if we want to analyze all traffic
             if (threatResult.isThreat || this.config.analyze_all_traffic) {
-                this.logger.info('Potential threat detected, queuing for LLM analysis', threatResult);
-
-                // Check queue size to prevent memory issues
-                if (this.threatQueue.length >= this.maxQueueSize) {
-                    this.logger.warn('Threat queue is full, dropping oldest entry');
-                    this.threatQueue.shift();
-                }
+                this.logger.info('Potential threat detected, adding to queue for LLM analysis', threatResult);
 
                 // Add to processing queue - LLM will make final decision
                 this.threatQueue.push({ logEntry, threatResult });
@@ -116,14 +109,9 @@ class LogSecurityAgent {
 
         try {
             while (this.threatQueue.length > 0) {
-                const { logEntry, threatResult } = this.threatQueue.shift();
+                const { logEntry, threatResult } = this.threatQueue[0]; // Peek at the first item
 
                 try {
-                    // Stopped using this,created it as a tool for the llm to use
-                    // Gather intelligence data first to provide context to LLM
-                    // const intelData = await this.intelChecker.checkIP(logEntry.ip);
-                    // threatResult.intelData = intelData;
-
                     // LLM makes the final decision with all available context
                     this.logger.info('Requesting LLM analysis for final threat determination');
                     const llmAnalysis = await this.llmAnalyzer.analyze(logEntry, threatResult);
@@ -151,9 +139,6 @@ class LogSecurityAgent {
 
                     // Act based on LLM decision
                     if (isMalicious) {
-                        // Send alert for all LLM-confirmed threats
-                        // await this.pushOverNotification.sendThreatAlert(logEntry, finalResult);
-
                         // Save malicious requests to supabase
                         const { error: postgresError } = await supabase
                             .from('logagent')
@@ -177,7 +162,7 @@ class LogSecurityAgent {
                         // Block IP if LLM confidence is high enough
                         if (confidence >= this.config.thresholds.block_ip_threshold) {
                             try {
-                                 blockIpAddress(logEntry.ip);
+                                blockIpAddress(logEntry.ip);
                                 this.logger.warn('IP blocked based on LLM decision', {
                                     ip: logEntry.ip,
                                     confidence: confidence,
@@ -194,11 +179,31 @@ class LogSecurityAgent {
                             confidence: confidence,
                             reason: llmAnalysis.explanation
                         });
+                        const { error: postgresError } = await supabase
+                            .from('logagent')
+                            .insert({
+                                ip_address: logEntry.ip,
+                                method: logEntry.method,
+                                query_string: logEntry.queryString,
+                                user_agent: logEntry.userAgent,
+                                url: logEntry.url,
+                                status: logEntry.status,
+                                decision: 'BENIGN',
+                                reasoning: llmAnalysis.explanation,
+                                decision_maker: 'LLM',
+                                confidence: confidence
+                            });
+                        if (postgresError) {
+                            this.logger.error('Error while creating supabase record:', postgresError);
+                        }
                     }
 
                     // Rate limiting - configurable delay between API calls
                     const processingDelay = this.config.processing_delay || 1000;
                     await new Promise(resolve => setTimeout(resolve, processingDelay));
+
+                    // Remove the processed item from the queue
+                    this.threatQueue.shift();
 
                 } catch (error) {
                     this.logger.error('Error in LLM threat processing:', error);
@@ -241,12 +246,23 @@ class LogSecurityAgent {
                             this.logger.error('Database error in fallback:', dbError);
                         }
                     }
+
+                    // Remove the processed item from the queue even if there was an error
+                    this.threatQueue.shift();
                 }
             }
         } finally {
             this.isProcessing = false;
+
+            // If new items were added to the queue while we were processing, start processing again
+            if (this.threatQueue.length > 0) {
+                this.processThreatQueue().catch(error => {
+                    this.logger.error('Error in threat queue processing:', error);
+                });
+            }
         }
     }
+
 
     /**
      * Fallback scoring method when LLM is unavailable
@@ -306,12 +322,27 @@ class LogSecurityAgent {
         this.logger.info('Shutting down agent');
 
         try {
+            // Stop accepting new log entries
+            await this.logParser.stop();
+
             // Wait for current processing to complete
-            while (this.isProcessing) {
-                await new Promise(resolve => setTimeout(resolve, 100));
+            this.logger.info(`Waiting for ${this.threatQueue.length} queued threats to finish processing`);
+
+            // Set a timeout to prevent hanging indefinitely
+            const maxWaitTime = 30000; // 30 seconds
+            const startTime = Date.now();
+
+            while (this.isProcessing && (Date.now() - startTime < maxWaitTime)) {
+                await new Promise(resolve => setTimeout(resolve, 500));
             }
 
-            await this.logParser.stop();
+            if (this.isProcessing) {
+                this.logger.warn('Shutdown timeout reached while processing threats');
+            } else if (this.threatQueue.length > 0) {
+                this.logger.info(`${this.threatQueue.length} threats remain in queue but will not be processed`);
+            } else {
+                this.logger.info('All queued threats processed successfully');
+            }
 
             try {
                 await this.pushOverNotification.sendMessage('🔴 Log Security Agent stopped');
