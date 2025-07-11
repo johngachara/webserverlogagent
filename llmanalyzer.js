@@ -315,6 +315,9 @@ class LLMAnalyzer {
     /**
      * Analyze using OpenAI-compatible format (OpenAI, Groq)
      */
+    /**
+     * Enhanced analyzeWithOpenAIFormat method that supports multiple rounds of function calls
+     */
     async analyzeWithOpenAIFormat(prompt) {
         const tools = this.getFunctionTools();
 
@@ -330,80 +333,89 @@ class LLMAnalyzer {
         ];
 
         try {
-            const completion = await this.client.chat.completions.create({
-                model: this.getModelName(),
-                messages: messages,
-                temperature: 0.1,
-                max_tokens: 500,
-                stream: false,
-                tools: tools,
-                tool_choice: "auto"
-            });
+            let maxRounds = 5; // Prevent infinite loops
+            let currentRound = 0;
 
-            const responseMessage = completion.choices[0].message;
-            const toolCalls = responseMessage.tool_calls;
+            while (currentRound < maxRounds) {
+                console.log(`Function calling round ${currentRound + 1}`);
 
-            if (toolCalls && toolCalls.length > 0) {
-                console.log(`Processing ${toolCalls.length} tool calls`);
-
-                // Add the assistant's response to messages
-                messages.push(responseMessage);
-
-                // Execute each tool call
-                for (const toolCall of toolCalls) {
-                    const functionName = toolCall.function.name;
-
-                    try {
-                        // Parse function arguments
-                        const functionArgs = JSON.parse(toolCall.function.arguments);
-                        console.log(`Parsed function args for ${functionName}:`, functionArgs);
-
-                        // Execute the function
-                        const functionResponse = await this.executeFunctionCall(functionName, functionArgs);
-
-                        // Ensure response is a string
-                        const responseContent = typeof functionResponse === 'string'
-                            ? functionResponse
-                            : JSON.stringify(functionResponse);
-
-                        messages.push({
-                            tool_call_id: toolCall.id,
-                            role: "tool",
-                            name: functionName,
-                            content: responseContent,
-                        });
-
-                    } catch (error) {
-                        console.error(`Error executing tool ${functionName}:`, error);
-                        // Handle tool execution errors gracefully
-                        messages.push({
-                            tool_call_id: toolCall.id,
-                            role: "tool",
-                            name: functionName,
-                            content: `Error executing ${functionName}: ${error.message}`,
-                        });
-                    }
-                }
-
-                // Get the final response after tool calls
-                const secondResponse = await this.client.chat.completions.create({
+                const completion = await this.client.chat.completions.create({
                     model: this.getModelName(),
                     messages: messages,
                     temperature: 0.1,
-                    max_tokens: 500
+                    max_tokens: 500,
+                    stream: false,
+                    tools: tools,
+                    tool_choice: "auto"
                 });
 
-                return secondResponse.choices[0].message.content;
+                const responseMessage = completion.choices[0].message;
+                const toolCalls = responseMessage.tool_calls;
+
+                // Add assistant's response to conversation
+                messages.push(responseMessage);
+
+                if (toolCalls && toolCalls.length > 0) {
+                    console.log(`Processing ${toolCalls.length} tool calls in round ${currentRound + 1}`);
+
+                    // Execute each tool call
+                    for (const toolCall of toolCalls) {
+                        const functionName = toolCall.function.name;
+
+                        try {
+                            const functionArgs = JSON.parse(toolCall.function.arguments);
+                            console.log(`Executing ${functionName} with args:`, functionArgs);
+
+                            const functionResponse = await this.executeFunctionCall(functionName, functionArgs);
+
+                            const responseContent = typeof functionResponse === 'string'
+                                ? functionResponse
+                                : JSON.stringify(functionResponse);
+
+                            messages.push({
+                                tool_call_id: toolCall.id,
+                                role: "tool",
+                                name: functionName,
+                                content: responseContent,
+                            });
+
+                        } catch (error) {
+                            console.error(`Error executing tool ${functionName}:`, error);
+                            messages.push({
+                                tool_call_id: toolCall.id,
+                                role: "tool",
+                                name: functionName,
+                                content: `Error executing ${functionName}: ${error.message}`,
+                            });
+                        }
+                    }
+
+                    currentRound++;
+                    // Continue the loop to allow for more function calls
+
+                } else {
+                    // No more tool calls, return the final response
+                    console.log(`No more tool calls. Final response in round ${currentRound + 1}`);
+                    return responseMessage.content;
+                }
             }
 
-            return responseMessage.content;
+            // If we've hit max rounds, make one final call without tools
+            console.log(`Max rounds reached (${maxRounds}). Getting final response.`);
+            const finalCompletion = await this.client.chat.completions.create({
+                model: this.getModelName(),
+                messages: messages,
+                temperature: 0.1,
+                max_tokens: 500
+            });
+
+            return finalCompletion.choices[0].message.content;
 
         } catch (error) {
             console.error(`Error in ${this.provider} API call:`, error);
             throw error;
         }
     }
-
     /**
      * Analyze using Anthropic Claude (no function calling yet)
      */
@@ -432,48 +444,77 @@ class LLMAnalyzer {
     /**
      * Enhanced system prompt for final authority mode
      */
+    /**
+     * Enhanced system prompt that emphasizes tool usage
+     */
     getSystemPrompt() {
         return `You are a cybersecurity expert with FINAL AUTHORITY over threat decisions. Your analysis will determine whether security actions are taken.
 
 ## CRITICAL RESPONSIBILITIES:
 - You have the final say on whether a request is malicious or benign
 - Your decision overrides all automated detection systems
-- Be thorough but decisive - systems depend on your judgment
-- Consider false positives carefully as they can disrupt legitimate users
-- Consider false negatives carefully as they can allow attacks through
+- Be EXTREMELY AGGRESSIVE in threat detection - err on the side of security
+- Act decisively on the FIRST sign of malicious behavior
+- Consider false negatives as MUCH WORSE than false positives
 
-## AVAILABLE TOOLS:
+## AVAILABLE TOOLS - USE STRATEGICALLY:
 
 ### IP Intelligence Tools:
-1. **checkIPIntelligence(ip)** - Comprehensive IP reputation check against multiple threat intelligence sources
-2. **checkVirusTotal(ip)** - Specific check against VirusTotal's database
-3. **checkAbuseIPDB(ip)** - Check against AbuseIPDB's database of reported malicious IPs
+1. **checkIPIntelligence(ip)** - Comprehensive check against multiple threat intelligence sources
+2. **checkVirusTotal(ip)** - Use for detailed engine-specific results
+3. **checkAbuseIPDB(ip)** - Use for abuse confidence and report history
 
 ### Monitoring and Memory Tools:
-4. **storeMonitoringLog(logEntry, confidenceScore, explanation)** - Store a request log for monitoring
-5. **checkStoredLogs(ipAddress)** - Check if there are existing monitoring logs for an IP
+4. **storeMonitoringLog(logEntry, confidenceScore, explanation)** - ALWAYS use for benign requests to establish baseline
+5. **checkStoredLogs(ipAddress)** - Check history before making decisions
 
-## MONITORING WORKFLOW:
-1. **First check if the IP is already being monitored** using checkStoredLogs(ipAddress)
-2. **If NOT already monitored and the request is suspicious**, store it using storeMonitoringLog()
-3. **If the IP is already being monitored**, you can see the pattern history
-4. **For clearly malicious requests**, proceed directly to blocking
+## ENHANCED THREAT DETECTION WORKFLOW:
 
-## TOOL USAGE GUIDELINES:
-- Use IP intelligence tools ONLY when you need reputation data to make a decision
-- Do NOT check IPs for obviously malicious requests
-- Use monitoring tools for suspicious but ambiguous cases
-- Always check existing monitoring logs before storing new ones
+**STEP 1:** Assess if request is OBVIOUSLY MALICIOUS:
+- If request contains clear attack patterns (SQL injection, XSS, etc.), IMMEDIATELY classify as MALICIOUS
+- If request targets sensitive endpoints with suspicious parameters, IMMEDIATELY classify as MALICIOUS
+- For OBVIOUSLY MALICIOUS requests, you can skip IP intelligence checks and log monitoring
+
+**STEP 2:** For requests that aren't OBVIOUSLY MALICIOUS:
+- IMMEDIATELY check IP intelligence with checkIPIntelligence(ip)
+- Check stored logs with checkStoredLogs(ipAddress)
+- ANY match in IP intelligence databases is a STRONG indicator of malice - treat as MALICIOUS
+- Even a SINGLE previous suspicious activity in logs increases suspicion level significantly
+
+**STEP 3:** Make DECISIVE judgments:
+- If IP intelligence shows ANY malicious indicators, IMMEDIATELY treat as MALICIOUS
+- If previous monitoring logs show ANY pattern of suspicious activity, treat as MALICIOUS
+- Don't wait for multiple rounds - act decisively on the FIRST warning sign
+- When in doubt, ALWAYS err on the side of security
+
+**STEP 4:** For BENIGN requests:
+- ALWAYS store monitoring logs for ALL benign requests using storeMonitoringLog
+- This is MANDATORY to establish baseline behavior and detect future anomalies
 
 ## RESPONSE FORMAT (MANDATORY):
+After using appropriate tools, provide:
+
 MALICIOUS: [YES/NO/UNCERTAIN]
 CONFIDENCE: [1-10]
 BLOCK_IP: [YES/NO]
 IMPACT: [HIGH/MEDIUM/LOW/NONE]
 EXPLANATION: [Your detailed reasoning in 2-3 sentences]
 ATTACK_TYPE: [Type if malicious, or BENIGN if not malicious]
+TOOLS_USED: [List the functions you called]
 
-Remember: Your decision has immediate consequences. Be thorough but decisive.`;
+## REVISED DECISION THRESHOLDS:
+- **MALICIOUS (6-10 confidence)**: Block immediately, high confidence in malicious intent
+- **SUSPICIOUS (3-5 confidence)**: Treat as likely malicious, monitor closely
+- **BENIGN (1-2 confidence)**: Monitor but allow, store logs for future reference
+
+## PATTERN RECOGNITION INDICATORS:
+- Even a SINGLE request with suspicious parameters is concerning
+- Requests targeting sensitive endpoints (admin, login, API)
+- Unusual query parameters or payload structures
+- Requests from IPs with ANY history in threat intelligence databases
+- Sequential probing of different endpoints from same IP
+
+Remember: Be EXTREMELY AGGRESSIVE in your threat detection. Don't wait for multiple rounds to establish a pattern. A single suspicious indicator is enough to treat a request as potentially malicious.`;
     }
 
     /**
@@ -482,38 +523,65 @@ Remember: Your decision has immediate consequences. Be thorough but decisive.`;
     buildEnhancedAnalysisPrompt(logEntry, threatResult) {
         return `🚨 FINAL SECURITY DECISION REQUIRED 🚨
 
-You are making the FINAL determination on this request. Security systems will take action based on your decision.
+You are making the FINAL determination on this request. Security systems will take immediate action based on your decision.
 
-REQUEST DETAILS:
-IP Address: ${logEntry.ip}
-Method: ${logEntry.method}
-URL: ${logEntry.url}
-Query String: ${logEntry.queryString || 'None'}
-User-Agent: ${logEntry.userAgent || 'None'}
-HTTP Status: ${logEntry.status}
-Timestamp: ${logEntry.timestamp || new Date().toISOString()}
+## REQUEST DETAILS:
+**IP Address:** ${logEntry.ip}
+**Method:** ${logEntry.method}
+**URL:** ${logEntry.url}
+**Query String:** ${logEntry.queryString || 'None'}
+**User-Agent:** ${logEntry.userAgent || 'None'}
+**HTTP Status:** ${logEntry.status}
+**Timestamp:** ${logEntry.timestamp || new Date().toISOString()}
 
-AUTOMATED DETECTION RESULTS:
-Threat Patterns Found: ${threatResult.threats ? threatResult.threats.map(t => `${t.type} (confidence: ${t.confidence})`).join(', ') : 'None'}
-Initial Threat Score: ${threatResult.confidence || 0}/10
-Raw Detection Rules Triggered: ${threatResult.threats ? threatResult.threats.length : 0}
+## AUTOMATED DETECTION RESULTS:
+**Threat Patterns Found:** ${threatResult.threats ? threatResult.threats.map(t => `${t.type} (confidence: ${t.confidence})`).join(', ') : 'None'}
+**Initial Threat Score:** ${threatResult.confidence || 0}/10
+**Detection Rules Triggered:** ${threatResult.threats ? threatResult.threats.length : 0}
 
-PAYLOAD ANALYSIS:
-${logEntry.payload ? JSON.stringify(logEntry.payload, null, 2) : 'No payload data'}
+## PAYLOAD ANALYSIS:
+${logEntry.payload ? JSON.stringify(logEntry.payload, null, 2) : 'No payload data available'}
 
-YOUR FINAL DECISION MUST ADDRESS:
-1. Is this request actually malicious and dangerous?
-2. What is your confidence in this decision? (1-10)
-3. What would happen if this request succeeded?
-4. Should this IP be blocked?
-5. Brief explanation of your reasoning
+## YOUR ENHANCED ANALYSIS WORKFLOW:
 
-DECISION GUIDANCE:
-- If OBVIOUSLY malicious, decide without checking IP reputation
-- If POTENTIALLY malicious but need context, use IP intelligence tools
-- If appears benign, no need to check IP reputation unless suspicious
+**STEP 1:** First, determine if this request is OBVIOUSLY MALICIOUS:
+- If threat patterns were found with high confidence scores (7+)
+- If request contains clear attack signatures (SQL injection, XSS, etc.)
+- If request targets sensitive endpoints with suspicious parameters
+- If YES, you can IMMEDIATELY classify as MALICIOUS without further checks
 
-Use the available tools strategically when additional context is needed.`;
+**STEP 2:** For requests that aren't OBVIOUSLY MALICIOUS:
+- Call checkIPIntelligence(${logEntry.ip}) to check against threat databases
+- Call checkStoredLogs("${logEntry.ip}") to check previous monitoring history
+- ANY match in IP intelligence is a STRONG indicator of malice
+- Even a SINGLE previous suspicious activity in logs increases suspicion significantly
+
+**STEP 3:** Make DECISIVE judgments:
+- MALICIOUS (confidence 6-10): Block immediately
+- SUSPICIOUS (confidence 3-5): Treat as likely malicious, monitor closely
+- BENIGN (confidence 1-2): Monitor but allow, ALWAYS store logs
+
+**STEP 4:** For BENIGN requests:
+- ALWAYS store monitoring logs using storeMonitoringLog for future reference
+- This is MANDATORY to establish baseline behavior and detect future anomalies
+
+## CRITICAL DECISION POINTS:
+1. **Malicious Intent:** Is this request trying to cause harm?
+2. **Confidence Level:** How certain are you in your assessment? (1-10)
+3. **Attack Impact:** What damage could occur if this request succeeds?
+4. **IP Blocking:** Should this IP be blocked from further access?
+5. **Pattern Recognition:** Could this be part of a larger attack sequence?
+
+## PATTERN RECOGNITION INDICATORS:
+- Even a SINGLE request with suspicious parameters is concerning
+- Requests targeting sensitive endpoints (admin, login, API)
+- Unusual query parameters or payload structures
+- Requests from IPs with ANY history in threat intelligence databases
+- Sequential probing of different endpoints from same IP
+
+⚠️ **CRITICAL RULE**: For OBVIOUSLY MALICIOUS requests, you can skip IP intelligence and log checks. For all other requests, use IP intelligence tools strategically. ALWAYS store monitoring logs for benign requests.
+
+**Make your final security determination now.**`;
     }
 
     /**
@@ -594,7 +662,7 @@ Use the available tools strategically when additional context is needed.`;
      */
     async testConnection() {
         try {
-            const testPrompt = `Test connection. Respond with a simple security analysis of IP 8.8.8.8 making a GET request to /test`;
+            const testPrompt = `Respond with who you are`;
 
             let response;
             switch (this.provider) {
