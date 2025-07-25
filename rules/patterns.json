@@ -1,0 +1,232 @@
+{
+  "sql_injection": {
+    "patterns": [
+      "(union\\s+select|union\\s+all\\s+select)",
+      "(select\\s+.*\\s+from|insert\\s+into|update\\s+.*\\s+set)",
+      "(drop\\s+table|delete\\s+from|truncate\\s+table)",
+      "('\\s*(or|and)\\s*'\\s*=\\s*')",
+      "(or\\s+1\\s*=\\s*1|and\\s+1\\s*=\\s*1)",
+      "(exec\\s*\\(|execute\\s*\\(|sp_executesql)",
+      "(concat\\s*\\(|char\\s*\\(|ascii\\s*\\()",
+      "(information_schema|sys\\.tables|sys\\.columns)",
+      "(sleep\\s*\\(|benchmark\\s*\\(|pg_sleep\\s*\\()",
+      "((\\%27)|(\\%22)|(\\%20or\\%20)|(\\%20and\\%20))",
+      "(0x[0-9a-f]+|unhex\\s*\\(|hex\\s*\\()",
+      "('\\s*--\\s*|--\\s*$)",
+      "(\\?.*=.*'\\s*or\\s*'.*'\\s*=\\s*')",
+      "(\\?.*=.*'\\s*or\\s*1\\s*=\\s*1)",
+      "(user\\s*=\\s*admin\\s*'\\s*--|password\\s*=\\s*'\\s*or\\s*1\\s*=\\s*1)",
+      "(id\\s*=\\s*\\d+\\s*'\\s*or\\s*'1'\\s*=\\s*'1)"
+    ],
+    "score": 8,
+    "description": "SQL injection attack patterns"
+  },
+  "xss": {
+    "patterns": [
+      "(<script[^>]*>|</script>|javascript:|vbscript:)",
+      "(onload\\s*=|onerror\\s*=|onclick\\s*=|onmouseover\\s*=)",
+      "(alert\\s*\\(|confirm\\s*\\(|prompt\\s*\\()",
+      "(<img[^>]*src[^>]*javascript:|<iframe[^>]*src)",
+      "(document\\.cookie|document\\.write|window\\.location)",
+      "(eval\\s*\\(|settimeout\\s*\\(|setinterval\\s*\\()",
+      "(<object[^>]*data|<embed[^>]*src|<form[^>]*action)",
+      "(\\%3Cscript|\\%3C\\%2Fscript|\\%22javascript:)",
+      "(fromcharcode\\s*\\(|string\\.fromcharcode)",
+      "(<svg[^>]*onload|<body[^>]*onload)",
+      "(\\?.*=.*<script>.*</script>)",
+      "(\\?.*=.*alert\\s*\\()",
+      "(search\\?q=.*<script>)",
+      "(%3Cscript%3E|%3C/script%3E)"
+    ],
+    "score": 7,
+    "description": "Cross-site scripting (XSS) patterns"
+  },
+  "path_traversal": {
+    "patterns": [
+      "(\\.\\./|\\.\\.\\\\/|%2e%2e%2f|%2e%2e%5c)",
+      "(/etc/passwd|/etc/shadow|/etc/hosts|/etc/group)",
+      "(\\\\windows\\\\system32|\\\\winnt\\\\system32)",
+      "(boot\\.ini|win\\.ini|system\\.ini|ntuser\\.dat)",
+      "(\\.\\./\\.\\./\\.\\./|\\.\\.\\\\\\.\\.\\\\\\.\\.\\\\/)",
+      "(%252e%252e%252f|%c0%ae%c0%ae%c0%af)",
+      "(\\.\\.\\\\|\\.\\.%2f|\\.\\.%5c)",
+      "(file:///|file:/etc/|file:/windows/)",
+      "(\\?.*input=\\.\\./\\.\\./\\.\\./\\.\\./)",
+      "(vulnerable\\.jsp\\?input=.*\\.\\./)",
+      "(\\.\\./\\.\\./\\.\\./\\.\\./\\.\\./\\.\\./)",
+      "(/(\\.\\./)+(etc|bin|usr|var|tmp)/)"
+    ],
+    "score": 9,
+    "description": "Directory traversal attack patterns"
+  },
+  "command_injection": {
+    "patterns": [
+      "(;\\s*(cat|ls|dir|type|more|less)\\s+)",
+      "(&&\\s*(whoami|id|uname|pwd|cd\\s+))",
+      "(\\|\\s*(nc|netcat|wget|curl|ping)\\s+)",
+      "(\\$\\([^)]*\\)|`[^`]*`|\\${[^}]*})",
+      "(/bin/(bash|sh|csh|ksh|zsh|tcsh))",
+      "(cmd\\.exe|powershell\\.exe|wscript\\.exe)",
+      "(\\\\x[0-9a-f]{2}|%[0-9a-f]{2}|\\\\[0-7]{3})",
+      "(exec\\s*\\(|system\\s*\\(|shell_exec\\s*\\()",
+      "(passthru\\s*\\(|popen\\s*\\(|proc_open\\s*\\()",
+      "(\\?.*cmd=.*id|\\?.*cmd=.*whoami)",
+      "(debug\\?cmd=)",
+      "(\\(\\)\\s*\\{\\s*:\\s*;\\s*\\}\\s*;)",
+      "(/bin/bash\\s*-c)"
+    ],
+    "score": 9,
+    "description": "Command injection attack patterns"
+  },
+  "file_inclusion": {
+    "patterns": [
+      "(php://input|php://filter|php://temp)",
+      "(data://text/plain|data://text/html)",
+      "(file://|ftp://|gopher://|dict://)",
+      "(include\\s*\\(|require\\s*\\(|include_once\\s*\\()",
+      "(require_once\\s*\\(|virtual\\s*\\()",
+      "(base64_decode\\s*\\(|gzinflate\\s*\\()",
+      "(allow_url_include|allow_url_fopen)",
+      "(\\?page=|\\?file=|\\?include=|\\?path=)",
+      "(\\.\\.%2f|\\.\\.%5c|\\.\\.\\\\)",
+      "(\\?page=http://.*\\.txt)",
+      "(index\\.php\\?page=http://)",
+      "(shell\\.txt|c99\\.php|r57\\.php)"
+    ],
+    "score": 8,
+    "description": "File inclusion attack patterns"
+  },
+  "nosql_injection": {
+    "patterns": [
+      "(\\$ne\\s*:|\\$gt\\s*:|\\$lt\\s*:|\\$regex\\s*:)",
+      "(\\$where\\s*:|\\$exists\\s*:|\\$in\\s*:)",
+      "(\\{\\s*\\$ne\\s*:|\\{\\s*\\$gt\\s*:)",
+      "(this\\s*\\..*==|this\\s*\\..*!=)",
+      "(\\|\\|.*==|&&.*==|sleep\\s*\\(.*\\))",
+      "(true}|false}|null}|undefined})"
+    ],
+    "score": 7,
+    "description": "NoSQL injection attack patterns"
+  },
+  "ldap_injection": {
+    "patterns": [
+      "(\\*\\)|\\(\\*|\\*\\()",
+      "(\\)\\(|\\(\\)|\\(\\()",
+      "(\\|\\(|\\&\\(|\\!\\()",
+      "(cn=\\*|ou=\\*|dc=\\*)",
+      "(objectClass=\\*|mail=\\*)"
+    ],
+    "score": 7,
+    "description": "LDAP injection attack patterns"
+  },
+  "ssrf": {
+    "patterns": [
+      "(localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0)",
+      "(169\\.254\\.|192\\.168\\.|10\\.)",
+      "(172\\.(1[6-9]|2[0-9]|3[01])\\.)",
+      "(file://|dict://|gopher://|ldap://)",
+      "(\\@localhost|\\@127\\.0\\.0\\.1)",
+      "(\\@\\[::\\]|\\@0\\.0\\.0\\.0)"
+    ],
+    "score": 8,
+    "description": "Server-side request forgery patterns"
+  },
+  "csrf": {
+    "patterns": [
+      "(csrf_token=|authenticity_token=)",
+      "(state=|nonce=|_token=)",
+      "(X-CSRF-Token|X-Requested-With)"
+    ],
+    "score": 5,
+    "description": "CSRF token bypass attempts"
+  },
+  "scanner_identification": {
+    "patterns": [
+      "(sqlmap/\\d+\\.\\d+)",
+      "(nikto/\\d+\\.\\d+)",
+      "(curl/\\d+\\.\\d+)",
+      "(python-requests/\\d+\\.\\d+)",
+      "(scanner|crawl|bot|spider)",
+      "(nmap|masscan|zmap)",
+      "(dirb|dirbuster|gobuster)",
+      "(burp|intruder|repeater)"
+    ],
+    "score": 6,
+    "description": "Security scanner and tool identification"
+  },
+  "admin_panel_probing": {
+    "patterns": [
+      "(/admin|/administrator|/wp-admin)",
+      "(/phpmyadmin|/pma|/mysql)",
+      "(/manager|/console|/control)",
+      "(/dashboard|/panel|/cpanel)",
+      "(/login|/signin|)",
+      "(/config|/configuration|/settings)",
+      "(/wp-login\\.php|/wp-config\\.php)"
+    ],
+    "score": 4,
+    "description": "Administrative interface probing"
+  },
+  "sensitive_file_access": {
+    "patterns": [
+      "(/\\.env|\\.htaccess|\\.htpasswd)",
+      "(/backup|/bak|/old|/tmp)",
+      "(/config\\.php|/database\\.php)",
+      "(/readme\\.txt|/changelog\\.txt)",
+      "(/robots\\.txt|/sitemap\\.xml)",
+      "(/web\\.config|/app\\.config)",
+      "(/install\\.php|/setup\\.php)"
+    ],
+    "score": 5,
+    "description": "Sensitive file access attempts"
+  },
+  "brute_force": {
+    "patterns": [
+      "(Failed password for)",
+      "(authentication failure)",
+      "(invalid user|user unknown)",
+      "(login failed|login error)",
+      "(bad password|wrong password)",
+      "(access denied|permission denied)",
+      "(too many failed attempts)"
+    ],
+    "score": 6,
+    "description": "Brute force attack indicators"
+  },
+  "reverse_shell": {
+    "patterns": [
+      "(python\\s+-c\\s+.*socket.*subprocess)",
+      "(bash\\s+-i\\s*>&\\s*/dev/tcp/)",
+      "(nc\\s+-e\\s+/bin/bash)",
+      "(rm\\s+/tmp/f;mkfifo\\s+/tmp/f)",
+      "(perl\\s+-e.*socket.*exec)",
+      "(ruby\\s+-rsocket)",
+      "(/bin/sh\\s+-i)",
+      "(exec\\s+5<>/dev/tcp/)"
+    ],
+    "score": 10,
+    "description": "Reverse shell attempt patterns"
+  },
+  "wordpress_specific": {
+    "patterns": [
+      "(/wp-content/|/wp-includes/|/wp-admin/)",
+      "(/wp-login\\.php|/wp-config\\.php)",
+      "(/wp-json/|/xmlrpc\\.php)",
+      "(/revslider/|/revolution/)",
+      "(/plugins/|/themes/|/uploads/)",
+      "(wp_user|wp_posts|wp_options)"
+    ],
+    "score": 4,
+    "description": "WordPress-specific attack patterns"
+  },
+  "shellshock": {
+    "patterns": [
+      "(\\(\\)\\s*\\{\\s*:\\s*;\\s*\\}\\s*;)",
+      "(bash_func_.*%%)",
+      "(/bin/bash\\s*-c\\s*['\"]echo\\s+hacked)",
+      "(CGI.*\\(\\).*\\{.*\\}.*echo)"
+    ],
+    "score": 9,
+    "description": "Shellshock vulnerability exploitation"
+  }
+}

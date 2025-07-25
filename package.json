@@ -1,0 +1,27 @@
+{
+  "name": "log-security-agent",
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Real-time log analysis and threat detection agent",
+  "main": "main.js",
+  "scripts": {
+    "start": "node main.js",
+    "dev": "nodemon main.js",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.54.0",
+    "@cerebras/cerebras_cloud_sdk": "^1.35.0",
+    "@supabase/supabase-js": "^2.50.3",
+    "@upstash/redis": "^1.35.1",
+    "axios": "^1.10.0",
+    "chokidar": "^3.6.0",
+    "groq-sdk": "^0.25.0",
+    "lodash": "^4.17.21",
+    "moment": "^2.30.1",
+    "openai": "^5.5.0",
+    "pushover-notifications": "^1.2.3",
+    "winston": "^3.17.0",
+    "yaml": "^2.8.0"
+  }
+}
