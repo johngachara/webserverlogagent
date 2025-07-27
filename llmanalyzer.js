@@ -85,6 +85,20 @@ class LLMAnalyzer {
             }
 
             const result = this.parseResponse(response);
+
+            // Handle system URL attribute
+            // The is_system_url attribute can come from two sources:
+            // 1. The threatResult (set by the ThreatDetector based on config.yaml)
+            // 2. The LLM's response (if it includes "is_system_url: true")
+            //
+            // If the LLM didn't detect it as a system URL but the threatResult indicates it is,
+            // we trust the threatResult and set the is_system_url attribute to true.
+            // This ensures that system URLs are always properly identified, even if the LLM
+            // doesn't explicitly mention it in its response.
+            if (!result.is_system_url && threatResult.is_system_url) {
+                result.is_system_url = true;
+            }
+
             this.analysisCache.set(cacheKey, result);
 
             if (this.analysisCache.size > 1000) {
@@ -512,6 +526,7 @@ Query String: ${logEntry.queryString || 'None'}
 User-Agent: ${logEntry.userAgent || 'None'}
 HTTP Status: ${logEntry.status}
 Timestamp: ${logEntry.timestamp || new Date().toISOString()}
+System URL: ${threatResult.is_system_url ? 'YES' : 'NO'}
 
 AUTOMATED DETECTION RESULTS:
 Threat Patterns Found: ${threatResult.threats ? threatResult.threats.map(t => `${t.type} (confidence: ${t.confidence})`).join(', ') : 'None'}
@@ -566,11 +581,19 @@ Normal user behavior:
 - Standard legitimate requests
 - Normal parameter usage
 - Expected user patterns
+- System URLs with no malicious content
 
 If YES:
 - Assign confidence 1-2
 - MANDATORY: Call storeMonitoringLog for baseline tracking
 - Logic: Build normal behavior patterns for anomaly detection
+
+SYSTEM URL HANDLING:
+- System URLs are trusted URLs configured by the system administrator
+- For system URLs, be more lenient in your assessment
+- Only flag system URLs as malicious if they contain clear attack patterns
+- For system URLs, focus on the content (payload, query parameters, etc.) rather than the URL path
+- Include "is_system_url: true" in your response for system URLs
 
 CONFIDENCE CALCULATION STRATEGY:
 
@@ -665,7 +688,8 @@ ANALYZE NOW AND ASSIGN ACCURATE CONFIDENCE SCORE;`
             impact: 'UNKNOWN',
             requiresManualReview: false,
             intelligenceBoost: '',
-            patternDetected: ''
+            patternDetected: '',
+            is_system_url: false // Initialize is_system_url attribute
         };
 
         try {
@@ -698,6 +722,12 @@ ANALYZE NOW AND ASSIGN ACCURATE CONFIDENCE SCORE;`
                     result.intelligenceBoost = trimmedLine.split(':').slice(1).join(':').trim();
                 } else if (trimmedLine.startsWith('PATTERN_DETECTED:')) {
                     result.patternDetected = trimmedLine.split(':').slice(1).join(':').trim();
+                } 
+                // Check if the LLM identified this as a system URL
+                // This happens when the LLM follows the instructions in the prompt
+                // to include "is_system_url: true" in its response for system URLs
+                else if (trimmedLine.includes('is_system_url: true')) {
+                    result.is_system_url = true;
                 }
             }
 

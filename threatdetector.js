@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import YAML from 'yaml';
 
 // Rule-based detection
 
@@ -9,6 +10,7 @@ class ThreatDetector {
         this.patterns = this.loadPatterns();
         this.whitelist = this.loadWhitelist();
         this.ipAttempts = new Map(); // Track brute force attempts
+        this.systemUrls = this.loadSystemUrls();
     }
 
     /**
@@ -35,6 +37,71 @@ class ThreatDetector {
             console.error('Failed to load whitelist:', error);
             return [];
         }
+    }
+
+    /**
+     * Load system URLs from config.yaml
+     * These URLs will be skipped during threat detection unless they contain malicious content
+     */
+    loadSystemUrls() {
+        try {
+            const configFile = fs.readFileSync('config.yaml', 'utf8');
+            const config = YAML.parse(configFile);
+
+            // Return empty arrays if system_urls section doesn't exist
+            if (!config.system_urls) {
+                return { patterns: [], specific: [] };
+            }
+
+            return {
+                patterns: config.system_urls.patterns || [],
+                specific: config.system_urls.specific || []
+            };
+        } catch (error) {
+            console.error('Failed to load system URLs:', error);
+            return { patterns: [], specific: [] };
+        }
+    }
+
+    /**
+     * Check if a URL is a system URL
+     * 
+     * System URLs are URLs that are part of the system and should be treated differently
+     * during threat detection. They are only considered threats if they contain malicious
+     * content that exceeds the minimum score threshold.
+     * 
+     * System URLs can be configured in config.yaml in two ways:
+     * 1. As specific URLs: Exact URL paths without query parameters (e.g., "/login", "/dashboard")
+     * 2. As regex patterns: JavaScript regex patterns to match multiple URLs
+     * 
+     * Examples of regex patterns:
+     * - "^/api" - Matches all URLs starting with "/api"
+     * - "^/admin" - Matches all URLs starting with "/admin"
+     * - "^/home$" - Matches exactly "/home" URL
+     * - "^/(home|about|contact)$" - Matches exactly "/home", "/about", or "/contact" URLs
+     * 
+     * @param {string} url - The URL to check
+     * @returns {boolean} - True if the URL is a system URL, false otherwise
+     */
+    isSystemUrl(url) {
+        // Check if the URL matches any of the specific URLs
+        if (this.systemUrls.specific.includes(url)) {
+            return true;
+        }
+
+        // Check if the URL matches any of the regex patterns
+        for (const pattern of this.systemUrls.patterns) {
+            try {
+                const regex = new RegExp(pattern);
+                if (regex.test(url)) {
+                    return true;
+                }
+            } catch (error) {
+                console.error(`Invalid regex pattern: ${pattern}`, error);
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -97,6 +164,9 @@ class ThreatDetector {
             return { isThreat: false, reason: 'Whitelisted IP' };
         }
 
+        // Check if this is a system URL
+        const isSystemUrl = this.isSystemUrl(logEntry.url);
+
         const threats = [];
         let maxScore = 0;
 
@@ -131,7 +201,20 @@ class ThreatDetector {
         }
 
         // Determine if this is a threat
-        const isThreat = maxScore >= this.thresholds.minimum_score || threats.length > 0;
+        // For system URLs, only consider it a threat if it contains malicious content
+        // that exceeds the minimum score threshold. This allows legitimate requests
+        // to system URLs to pass through without being flagged as threats, while still
+        // protecting against malicious requests to system URLs.
+        // 
+        // For non-system URLs, consider it a threat if:
+        // 1. The maximum score exceeds the minimum threshold, OR
+        // 2. Any threats were detected (even if they don't exceed the threshold)
+        let isThreat;
+        if (isSystemUrl) {
+            isThreat = maxScore >= this.thresholds.minimum_score;
+        } else {
+            isThreat = maxScore >= this.thresholds.minimum_score || threats.length > 0;
+        }
 
         return {
             isThreat,
@@ -141,7 +224,8 @@ class ThreatDetector {
             timestamp: logEntry.timestamp,
             method: logEntry.method,
             url: logEntry.url,
-            userAgent: logEntry.userAgent
+            userAgent: logEntry.userAgent,
+            is_system_url: isSystemUrl // Add the is_system_url attribute
         };
     }
 

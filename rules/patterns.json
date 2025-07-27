@@ -160,9 +160,9 @@
       "(/phpmyadmin|/pma|/mysql)",
       "(/manager|/console|/control)",
       "(/dashboard|/panel|/cpanel)",
-      "(/login|/signin|)",
+      "(/login|/signin)",
       "(/config|/configuration|/settings)",
-      "(/wp-login\\.php|/wp-config\\.php)"
+      "(/wp-login\\Details.php|/wp-config\\.php)"
     ],
     "score": 4,
     "description": "Administrative interface probing"

@@ -4,7 +4,6 @@ import winston from 'winston';
 import LogParser from './logparser.js';
 import ThreatDetector from './threatdetector.js';
 import LLMAnalyzer from './llmanalyzer.js';
-import IntelChecker from './intelchecker.js';
 import PushoverNotifier from './pushover.js';
 import { blockIpAddress } from './llmtools.js';
 import { createClient } from '@supabase/supabase-js';
@@ -151,7 +150,8 @@ class LogSecurityAgent {
                                 decision: finalResult.finalDecision,
                                 reasoning: llmAnalysis.explanation,
                                 decision_maker: 'LLM',
-                                confidence: finalResult.finalScore
+                                confidence: finalResult.finalScore,
+                                is_system_url: llmAnalysis.is_system_url || false
                             });
 
                         if (postgresError) {
@@ -190,7 +190,8 @@ class LogSecurityAgent {
                                 decision: 'BENIGN',
                                 reasoning: llmAnalysis.explanation,
                                 decision_maker: 'LLM',
-                                confidence: confidence
+                                confidence: confidence,
+                                is_system_url: llmAnalysis.is_system_url || false
                             });
                         if (postgresError) {
                             this.logger.error('Error while creating supabase record:', postgresError);
@@ -235,7 +236,8 @@ class LogSecurityAgent {
                                     status: logEntry.status,
                                     decision: 'THREAT_FALLBACK',
                                     decision_maker: 'FALLBACK',
-                                    confidence: fallbackScore
+                                    confidence: fallbackScore,
+                                    is_system_url: threatResult.is_system_url || false
                                 });
 
                             if (fallbackError) {
