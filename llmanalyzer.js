@@ -2,15 +2,25 @@ import OpenAI from 'openai';
 import Groq from 'groq-sdk';
 import Anthropic from '@anthropic-ai/sdk';
 import Cerebras from '@cerebras/cerebras_cloud_sdk';
-import { checkAbuseIPDB,  checkVirusTotal } from "./llmtools.js";
+import { checkAbuseIPDB, checkVirusTotal } from "./llmtools.js";
 import { checkStoredLogs, storeMonitoringLog } from "./upstash.js";
 
 class LLMAnalyzer {
-    constructor(apiKey, provider = 'cerebras' ) {
+    constructor(apiKey, provider = 'cerebras') {
         this.apiKey = apiKey;
         this.provider = provider;
         this.client = this.initializeClient();
-        this.analysisCache = new Map();
+
+        // Cache structure: Map<ipAddress, analysisResult>
+        // This allows us to quickly check if an IP is already marked as malicious
+        this.ipCache = new Map();
+
+        // Queue tracking: Map<ipAddress, Set<requestKeys>>
+        // Tracks all pending requests per IP so we can clean them up
+        this.ipRequestQueue = new Map();
+
+        // Request cache for detailed caching: Map<requestKey, analysisResult>
+        this.requestCache = new Map();
     }
 
     initializeClient() {
@@ -20,53 +30,93 @@ class LLMAnalyzer {
                     apiKey: this.apiKey,
                     baseURL: 'https://models.github.ai/inference'
                 });
-
             case 'groq':
-                return new Groq({
-                    apiKey: this.apiKey
-                });
+                return new Groq({ apiKey: this.apiKey });
             case 'cerebras':
-                return  new Cerebras({
-                    apiKey: this.apiKey,
-                });
+                return new Cerebras({ apiKey: this.apiKey });
             case 'anthropic':
-                return new Anthropic({
-                    apiKey: this.apiKey
-                });
-
+                return new Anthropic({ apiKey: this.apiKey });
             default:
                 throw new Error(`Unsupported provider: ${this.provider}`);
         }
     }
 
     getModelName() {
-        switch (this.provider) {
-            case 'openai':
-                return 'gpt-4o';
-            case 'groq':
-                return 'llama3-70b-8192';
-            case 'anthropic':
-                return 'claude-3-sonnet-20240229';
-             case 'cerebras':
-                 return 'llama3.3-70b'
-            default:
-                return 'gpt-4o';
-        }
+        const models = {
+            'openai': 'gpt-4o',
+            'groq': 'llama3-70b-8192',
+            'anthropic': 'claude-3-sonnet-20240229',
+            'cerebras': 'llama3.3-70b'
+        };
+        return models[this.provider] || 'llama3.3-70b';
     }
 
-    createCacheKey(logEntry) {
+    /**
+     * Creates a unique key for caching individual requests
+     */
+    createRequestKey(logEntry) {
         return `${logEntry.ip}_${logEntry.method}_${logEntry.url}_${JSON.stringify(logEntry.payload || {})}`;
     }
 
+    /**
+     * Adds a request to the IP's queue for tracking
+     */
+    addToQueue(ip, requestKey) {
+        if (!this.ipRequestQueue.has(ip)) {
+            this.ipRequestQueue.set(ip, new Set());
+        }
+        this.ipRequestQueue.get(ip).add(requestKey);
+    }
+
+    /**
+     * Removes all pending requests from a malicious IP
+     */
+    cleanupMaliciousIP(ip) {
+        const requests = this.ipRequestQueue.get(ip);
+        if (requests) {
+            // Remove all cached requests for this IP
+            requests.forEach(requestKey => {
+                this.requestCache.delete(requestKey);
+            });
+
+            // Clear the queue for this IP
+            this.ipRequestQueue.delete(ip);
+
+            console.log(`Cleaned up ${requests.size} pending requests from malicious IP: ${ip}`);
+        }
+    }
+
+    /**
+     * Main analysis method with optimized caching and queue management
+     */
     async analyze(logEntry, threatResult) {
+        const ip = logEntry.ip;
+        const requestKey = this.createRequestKey(logEntry);
+
         try {
-            const cacheKey = this.createCacheKey(logEntry);
-            if (this.analysisCache.has(cacheKey)) {
-                console.log('Using cached LLM analysis for similar request');
-                return this.analysisCache.get(cacheKey);
+            // Check if IP is already marked as malicious
+            if (this.ipCache.has(ip)) {
+                const cachedResult = this.ipCache.get(ip);
+                if (cachedResult.confidence >= 8) {
+                    console.log(`IP ${ip} already marked as malicious - blocking immediately`);
+                    return {
+                        ...cachedResult,
+                        explanation: 'IP previously identified as malicious - auto-blocked'
+                    };
+                }
             }
 
-            const prompt = this.buildEnhancedAnalysisPrompt(logEntry, threatResult);
+            // Check for exact request match
+            if (this.requestCache.has(requestKey)) {
+                console.log('Using cached analysis for identical request');
+                return this.requestCache.get(requestKey);
+            }
+
+            // Add to queue for potential cleanup
+            this.addToQueue(ip, requestKey);
+
+            // Perform analysis
+            const prompt = this.buildAnalysisPrompt(logEntry, threatResult);
             let response;
 
             switch (this.provider) {
@@ -75,36 +125,32 @@ class LLMAnalyzer {
                 case 'cerebras':
                     response = await this.analyzeWithOpenAIFormat(prompt);
                     break;
-
                 case 'anthropic':
                     response = await this.analyzeWithAnthropic(prompt);
                     break;
-
                 default:
                     throw new Error(`Unsupported provider: ${this.provider}`);
             }
 
             const result = this.parseResponse(response);
 
-            // Handle system URL attribute
-            // The is_system_url attribute can come from two sources:
-            // 1. The threatResult (set by the ThreatDetector based on config.yaml)
-            // 2. The LLM's response (if it includes "is_system_url: true")
-            //
-            // If the LLM didn't detect it as a system URL but the threatResult indicates it is,
-            // we trust the threatResult and set the is_system_url attribute to true.
-            // This ensures that system URLs are always properly identified, even if the LLM
-            // doesn't explicitly mention it in its response.
+            // Handle system URL attribute from threatResult
             if (!result.is_system_url && threatResult.is_system_url) {
                 result.is_system_url = true;
             }
 
-            this.analysisCache.set(cacheKey, result);
+            // Cache the result
+            this.requestCache.set(requestKey, result);
 
-            if (this.analysisCache.size > 1000) {
-                const firstKey = this.analysisCache.keys().next().value;
-                this.analysisCache.delete(firstKey);
+            // If malicious (confidence >= 8), cache IP and cleanup queue
+            if (result.confidence >= 8) {
+                this.ipCache.set(ip, result);
+                this.cleanupMaliciousIP(ip);
+                console.log(`IP ${ip} marked as malicious with confidence ${result.confidence}`);
             }
+
+            // Cache cleanup to prevent memory bloat
+            this.maintainCacheSize();
 
             return result;
 
@@ -123,23 +169,42 @@ class LLMAnalyzer {
         }
     }
 
+    /**
+     * Maintains cache size limits
+     */
+    maintainCacheSize() {
+        // Limit IP cache to 500 entries
+        if (this.ipCache.size > 500) {
+            const firstKey = this.ipCache.keys().next().value;
+            this.ipCache.delete(firstKey);
+        }
+
+        // Limit request cache to 1000 entries
+        if (this.requestCache.size > 1000) {
+            const firstKey = this.requestCache.keys().next().value;
+            this.requestCache.delete(firstKey);
+        }
+    }
+
+    /**
+     * Function tools definition for LLM
+     */
     getFunctionTools() {
         return [
             {
                 type: "function",
                 function: {
                     name: "checkVirusTotal",
-                    description: "Check an IP address specifically against VirusTotal's database. Returns detailed analysis from multiple antivirus engines including malicious/suspicious counts and engine-specific results.",
+                    description: "Check IP against VirusTotal database for malicious activity",
                     parameters: {
                         type: "object",
                         properties: {
                             ip: {
                                 type: "string",
-                                description: "The IPv4 or IPv6 address to check against VirusTotal (e.g., 192.168.1.100)"
+                                description: "IPv4 or IPv6 address to check"
                             }
                         },
-                        required: ["ip"],
-                        additionalProperties: false
+                        required: ["ip"]
                     }
                 }
             },
@@ -147,17 +212,16 @@ class LLMAnalyzer {
                 type: "function",
                 function: {
                     name: "checkAbuseIPDB",
-                    description: "Check an IP address against AbuseIPDB's database of reported malicious IPs. Returns abuse confidence percentage, total reports, and usage type information.",
+                    description: "Check IP against AbuseIPDB for abuse reports",
                     parameters: {
                         type: "object",
                         properties: {
                             ip: {
                                 type: "string",
-                                description: "The IPv4 or IPv6 address to check against AbuseIPDB (e.g., 192.168.1.100)"
+                                description: "IPv4 or IPv6 address to check"
                             }
                         },
-                        required: ["ip"],
-                        additionalProperties: false
+                        required: ["ip"]
                     }
                 }
             },
@@ -165,52 +229,33 @@ class LLMAnalyzer {
                 type: "function",
                 function: {
                     name: "storeMonitoringLog",
-                    description: "Store a request log entry in Redis for monitoring purposes. Use this for requests that you want to monitor but are not clearly malicious. The data will be stored for 1 hour for pattern analysis.",
+                    description: "Store suspicious request for pattern monitoring",
                     parameters: {
                         type: "object",
                         properties: {
                             logEntry: {
                                 type: "object",
-                                description: "The log entry object containing request details",
+                                description: "Request log entry",
                                 properties: {
-                                    ip: {
-                                        type: "string",
-                                        description: "IP address of the request"
-                                    },
-                                    method: {
-                                        type: "string",
-                                        description: "HTTP method (GET, POST, etc.)"
-                                    },
-                                    queryString: {
-                                        type: "string",
-                                        description: "Query string from the request"
-                                    },
-                                    userAgent: {
-                                        type: "string",
-                                        description: "User agent string"
-                                    },
-                                    url: {
-                                        type: "string",
-                                        description: "Requested URL"
-                                    },
-                                    status: {
-                                        type: "number",
-                                        description: "HTTP status code"
-                                    }
+                                    ip: { type: "string" },
+                                    method: { type: "string" },
+                                    queryString: { type: "string" },
+                                    userAgent: { type: "string" },
+                                    url: { type: "string" },
+                                    status: { type: "number" }
                                 },
                                 required: ["ip", "method", "queryString", "userAgent", "url", "status"]
                             },
                             confidenceScore: {
                                 type: "number",
-                                description: "Your confidence score (0-10) for this being suspicious"
+                                description: "Confidence score (0-10)"
                             },
                             explanation: {
                                 type: "string",
-                                description: "Your explanation for this being suspicious"
+                                description: "Explanation for suspicion"
                             }
                         },
-                        required: ["logEntry", "confidenceScore", "explanation"],
-                        additionalProperties: false
+                        required: ["logEntry", "confidenceScore", "explanation"]
                     }
                 }
             },
@@ -218,23 +263,25 @@ class LLMAnalyzer {
                 type: "function",
                 function: {
                     name: "checkStoredLogs",
-                    description: "Check if there are existing monitoring logs for a specific IP address. Use this before storing new logs to see if the IP is already being monitored.",
+                    description: "Check existing monitoring logs for IP patterns",
                     parameters: {
                         type: "object",
                         properties: {
                             ipAddress: {
                                 type: "string",
-                                description: "The IP address to check for existing monitoring logs"
+                                description: "IP address to check for existing logs"
                             }
                         },
-                        required: ["ipAddress"],
-                        additionalProperties: false
+                        required: ["ipAddress"]
                     }
                 }
             }
         ];
     }
 
+    /**
+     * Available function mappings
+     */
     getAvailableFunctions() {
         return {
             "checkVirusTotal": checkVirusTotal,
@@ -244,6 +291,9 @@ class LLMAnalyzer {
         };
     }
 
+    /**
+     * Execute function calls from LLM
+     */
     async executeFunctionCall(functionName, functionArgs) {
         const availableFunctions = this.getAvailableFunctions();
         const functionToCall = availableFunctions[functionName];
@@ -262,11 +312,9 @@ class LLMAnalyzer {
                 case 'checkAbuseIPDB':
                     result = await functionToCall(functionArgs.ip);
                     break;
-
                 case 'checkStoredLogs':
                     result = await functionToCall(functionArgs.ipAddress);
                     break;
-
                 case 'storeMonitoringLog':
                     result = await storeMonitoringLog(
                         functionArgs.logEntry,
@@ -274,7 +322,6 @@ class LLMAnalyzer {
                         functionArgs.explanation
                     );
                     break;
-
                 default:
                     throw new Error(`Unknown function: ${functionName}`);
             }
@@ -288,9 +335,11 @@ class LLMAnalyzer {
         }
     }
 
+    /**
+     * OpenAI-format API analysis with tool support
+     */
     async analyzeWithOpenAIFormat(prompt) {
         const tools = this.getFunctionTools();
-
         const messages = [
             {
                 role: "system",
@@ -298,12 +347,12 @@ class LLMAnalyzer {
             },
             {
                 role: "user",
-                content: prompt,
+                content: prompt
             }
         ];
 
         try {
-            console.log('Making single API call with tool support');
+            console.log('Making API call with tool support');
 
             const completion = await this.client.chat.completions.create({
                 model: this.getModelName(),
@@ -319,26 +368,23 @@ class LLMAnalyzer {
             const toolCalls = responseMessage.tool_calls;
 
             if (toolCalls && toolCalls.length > 0) {
-                console.log(`Processing ${toolCalls.length} tool calls in parallel`);
+                console.log(`Processing ${toolCalls.length} tool calls`);
 
+                // Execute all tool calls in parallel
                 const toolCallPromises = toolCalls.map(async (toolCall) => {
                     const functionName = toolCall.function.name;
 
                     try {
                         const functionArgs = JSON.parse(toolCall.function.arguments);
-                        console.log(`Executing ${functionName} with args:`, functionArgs);
-
                         const functionResponse = await this.executeFunctionCall(functionName, functionArgs);
-
-                        const responseContent = typeof functionResponse === 'string'
-                            ? functionResponse
-                            : JSON.stringify(functionResponse);
 
                         return {
                             tool_call_id: toolCall.id,
                             role: "tool",
                             name: functionName,
-                            content: responseContent,
+                            content: typeof functionResponse === 'string'
+                                ? functionResponse
+                                : JSON.stringify(functionResponse)
                         };
                     } catch (error) {
                         console.error(`Error executing tool ${functionName}:`, error);
@@ -346,7 +392,7 @@ class LLMAnalyzer {
                             tool_call_id: toolCall.id,
                             role: "tool",
                             name: functionName,
-                            content: `Error executing ${functionName}: ${error.message}`,
+                            content: `Error: ${error.message}`
                         };
                     }
                 });
@@ -355,7 +401,7 @@ class LLMAnalyzer {
                 messages.push(responseMessage);
                 messages.push(...toolResponses);
 
-                console.log('Making final API call for analysis result');
+                // Get final analysis
                 const finalCompletion = await this.client.chat.completions.create({
                     model: this.getModelName(),
                     messages: messages,
@@ -364,9 +410,7 @@ class LLMAnalyzer {
                 });
 
                 return finalCompletion.choices[0].message.content;
-
             } else {
-                console.log('No tool calls needed, returning direct response');
                 return responseMessage.content;
             }
 
@@ -376,6 +420,9 @@ class LLMAnalyzer {
         }
     }
 
+    /**
+     * Anthropic API analysis
+     */
     async analyzeWithAnthropic(prompt) {
         try {
             const message = await this.client.messages.create({
@@ -398,286 +445,83 @@ class LLMAnalyzer {
         }
     }
 
+    /**
+     * Concise system prompt focused on core decision making
+     */
     getSystemPrompt() {
-        return `You are a cybersecurity expert with FINAL AUTHORITY over threat decisions. Your CONFIDENCE SCORE determines blocking (8+ = BLOCKED).
+        return `You are a cybersecurity expert. Your CONFIDENCE SCORE (1-10) determines blocking: 8+ = BLOCKED.
 
-CRITICAL UNDERSTANDING:
-- CONFIDENCE 8+ = AUTOMATIC BLOCK - You don't decide blocking, your confidence does
-- CONFIDENCE 1-7 = ALLOWED - But monitored based on suspicion level
-- Your job is to assess maliciousness and assign accurate confidence scores
-- The monitoring system is your "brain" for pattern detection and ambiguous cases
+ANALYSIS PRIORITY:
+1. OBVIOUS ATTACKS (8-10 confidence): SQL injection, XSS, directory traversal, command injection etc
+   → Assign high confidence immediately, NO TOOLS NEEDED
 
-SMART TOOL USAGE STRATEGY:
+2. SUSPICIOUS REQUESTS (4-7 confidence): Recon attempts, unusual patterns, port scans etc
+   → Use checkAbuseIPDB() or checkVirusTotal() to boost confidence if needed
 
-OBVIOUSLY MALICIOUS (Confidence 8-10):
-Examples: SQL injection, XSS, directory traversal, clear exploit attempts
-Action: Assign high confidence immediately - NO TOOLS NEEDED
-Why: Clear attack patterns don't need IP intelligence or monitoring
+3. AMBIGUOUS REQUESTS (3-6 confidence): Unclear intent, repeated requests
+   → Use checkStoredLogs() and storeMonitoringLog() for pattern detection
 
-BORDERLINE/RECONNAISSANCE (Confidence 4-7):
-Examples: Port scans, unusual parameters, recon attempts, suspicious paths
-Tools to use: 
-- checkVirusTotal(ip) - If you need detailed engine results
-- checkAbuseIPDB(ip) - For abuse history from abuseipdb
-Logic: If IP has malicious history + borderline request = Higher confidence (maybe 8+)
+4. BENIGN REQUESTS (1-2 confidence): Normal user behavior
+   → Optionally use storeMonitoringLog() for baseline
 
-AMBIGUOUS/SUSPICIOUS (Confidence 3-6):
-Examples: Unusual but not clearly malicious, repeated requests, weird timing
-Tools to use:
-- checkStoredLogs(ipAddress) - MANDATORY to check patterns
-- storeMonitoringLog(logEntry, confidenceScore, explanation) - MANDATORY to add to monitoring
-Logic: Let the monitoring "brain" detect patterns over time
+TOOL USAGE RULES:
+- Clear attacks: Skip tools, assign 8-10 confidence
+- Borderline cases: Use IP intelligence tools (checkAbuseIPDB/checkVirusTotal)
+- Ambiguous cases: Use monitoring tools (checkStoredLogs/storeMonitoringLog)
+- Avoid unnecessary tool calls for obvious cases
 
-BENIGN (Confidence 1-2):
-Examples: Normal user behavior, legitimate requests
-Tools to use: 
-- storeMonitoringLog(logEntry, confidenceScore, explanation) - MANDATORY for baseline
-Logic: Build baseline behavior for future pattern detection
+SYSTEM URLS:
+- System URLs are admin-configured trusted URLs
+- Be lenient unless payload contains clear attacks
+- Include "is_system_url: true" in response when applicable
 
-INTELLIGENT DECISION FLOW:
-
-STEP 1: INITIAL CLASSIFICATION
-IF request has CLEAR attack patterns (SQL injection, XSS, etc.)
-  → CONFIDENCE 8-10 (BLOCKED) - Skip all tools
-
-ELSE IF request is suspicious/reconnaissance 
-  → Use IP Intelligence tools to boost confidence
-
-ELSE IF request is ambiguous/borderline
-  → Use Monitoring tools (checkStoredLogs + storeMonitoringLog)
-
-ELSE (benign)
-  → Use storeMonitoringLog for baseline
-
-STEP 2: CONFIDENCE CALCULATION
-- Base confidence from request analysis
-- IP intelligence boost (+1 to +3 if malicious IP)
-- Pattern detection boost (+1 to +2 if suspicious patterns found)
-- Historical context (monitoring logs influence)
-
-STEP 3: TOOL SELECTION LOGIC
-For borderline malicious requests
-if (confidence >= 4 && confidence <= 7) {
-    call:  checkVirusTotal(ip) 
-            checkAbuseIPDB(ip) 
-}
-
-For ambiguous requests  
-if (confidence >= 3 && confidence <= 6) {
-    call: checkStoredLogs(ipAddress)
-    call: storeMonitoringLog(logEntry, confidence, explanation)
-}
-
-For benign requests
-if (confidence <= 2) {
-    call: storeMonitoringLog(logEntry, confidence, explanation)
-}
-
-RESPONSE FORMAT (MANDATORY):
+RESPONSE FORMAT:
 MALICIOUS: [YES/NO/UNCERTAIN]
 CONFIDENCE: [1-10]
-EXPLANATION: [Your detailed reasoning in 2-3 sentences]
-ATTACK_TYPE: [Type if malicious, or BENIGN if not malicious]
-TOOLS_USED: [List the functions you called]
-INTELLIGENCE_BOOST: [How IP intelligence affected confidence]
-PATTERN_DETECTED: [Any patterns found in monitoring logs]
+EXPLANATION: [Brief reasoning]
+ATTACK_TYPE: [Type or BENIGN]
 
-CONFIDENCE SCORING GUIDE:
-- 10: Definitive exploit attempt (immediate block)
-- 9: High-confidence attack pattern (immediate block)
-- 8: Likely malicious with evidence (immediate block)
-- 7: Suspicious with concerning indicators
-- 6: Moderately suspicious, needs monitoring
-- 5: Borderline, could be legitimate or malicious
-- 4: Slightly suspicious, worth tracking
-- 3: Unusual but probably legitimate
-- 2: Normal with minor oddities
-- 1: Completely benign/baseline
-
-MONITORING SYSTEM INTELLIGENCE:
-- checkStoredLogs reveals patterns: repeated requests, escalating behavior, timing patterns
-- storeMonitoringLog builds the "brain": baseline behavior, anomaly detection, pattern recognition
-- Use these tools to detect:
-  - Brute force attempts (repeated failures)
-  - Reconnaissance campaigns (systematic probing)
-  - Escalating attacks (increasing maliciousness over time)
-  - Distributed attacks (multiple IPs, same pattern)
-
-CRITICAL RULES:
-1. Always assign accurate confidence - blocking depends on it
-2. Use IP intelligence for borderline cases - it can push confidence over 8
-3. Use monitoring tools for ambiguous cases - they're your pattern detection brain
-4. Force tool usage as specified - each category has mandatory tools
-5. Don't be afraid of high confidence - 8+ means certain threat
-
-Remember: Your confidence score is the blocking mechanism. Be precise, use tools strategically, and leverage the monitoring brain for complex pattern detection.`;
+CONFIDENCE GUIDE:
+10-9: Definitive attacks
+8: Likely malicious 
+7-4: Suspicious, needs monitoring
+3-1: Benign/baseline`;
     }
 
-    buildEnhancedAnalysisPrompt(logEntry, threatResult) {
-        return `CONFIDENCE-BASED THREAT ASSESSMENT REQUIRED
-
-Your CONFIDENCE SCORE (1-10) determines the action: 8+ = AUTOMATIC BLOCK
+    /**
+     * Build analysis prompt with request details
+     */
+    buildAnalysisPrompt(logEntry, threatResult) {
+        return `THREAT ASSESSMENT REQUEST
 
 REQUEST DETAILS:
-IP Address: ${logEntry.ip}
+IP: ${logEntry.ip}
 Method: ${logEntry.method}
 URL: ${logEntry.url}
-Query String: ${logEntry.queryString || 'None'}
+Query: ${logEntry.queryString || 'None'}
 User-Agent: ${logEntry.userAgent || 'None'}
-HTTP Status: ${logEntry.status}
-Timestamp: ${logEntry.timestamp || new Date().toISOString()}
+Status: ${logEntry.status}
 System URL: ${threatResult.is_system_url ? 'YES' : 'NO'}
 
-AUTOMATED DETECTION RESULTS:
-Threat Patterns Found: ${threatResult.threats ? threatResult.threats.map(t => `${t.type} (confidence: ${t.confidence})`).join(', ') : 'None'}
-Initial Threat Score: ${threatResult.confidence || 0}/10
-Detection Rules Triggered: ${threatResult.threats ? threatResult.threats.length : 0}
+AUTOMATED DETECTION:
+Threats Found: ${threatResult.threats ? threatResult.threats.map(t => `${t.type} (${t.confidence})`).join(', ') : 'None'}
+Initial Score: ${threatResult.confidence || 0}/10
 
-PAYLOAD ANALYSIS:
-${logEntry.payload ? JSON.stringify(logEntry.payload, null, 2) : 'No payload data available'}
+PAYLOAD:
+${logEntry.payload ? JSON.stringify(logEntry.payload, null, 2) : 'No payload'}
 
-INTELLIGENT ASSESSMENT WORKFLOW:
+ANALYSIS STEPS:
+1. Check for obvious attack patterns (assign 8-10 if found)
+2. If suspicious but unclear, use appropriate tools
+3. Assign final confidence score
+4. Provide assessment in required format
 
-OBVIOUSLY MALICIOUS? (Skip tools, assign confidence 8-10)
-
-Check for clear attack patterns:
-SQL injection attempts (UNION, SELECT, DROP, etc.)
-XSS attempts (script tags, javascript:, etc.)
-Directory traversal (../../../, etc.)
-Command injection (; && || etc.)
-Clear exploit attempts or malformed requests
-
-If YES: Assign confidence 8-10 immediately. NO TOOLS NEEDED.
-
-BORDERLINE/RECONNAISSANCE? (Use IP intelligence tools)
-Check for suspicious but not definitive patterns:
-- Port scanning behavior
-- Unusual parameter combinations
-- Reconnaissance attempts (/admin, /.git, etc.)
-- Suspicious paths or methods
-- Error-inducing requests
-
-If YES: 
-- Assign base confidence 4-7
-- MANDATORY: Call - checkAbuseIPDB(${logEntry.ip})
-- Optional: Call checkVirusTotal(${logEntry.ip}) for detailed analysis
-- Logic: If IP has malicious history, boost confidence by 2-3 points
-
-AMBIGUOUS/SUSPICIOUS? (Use monitoring brain)
-Check for unclear patterns:
-- Repeated requests (could be legitimate or attack)
-- Unusual timing patterns
-- Weird but not clearly malicious behavior
-- Edge cases that need pattern analysis
-
-If YES:
-- Assign base confidence 3-6
-- MANDATORY: Call checkStoredLogs("${logEntry.ip}")
-- MANDATORY: Call storeMonitoringLog with your assessment
-- Logic: Let monitoring system detect patterns over time
-
-BENIGN? (Store for baseline)
-Normal user behavior:
-- Standard legitimate requests
-- Normal parameter usage
-- Expected user patterns
-- System URLs with no malicious content
-
-If YES:
-- Assign confidence 1-2
-- MANDATORY: Call storeMonitoringLog for baseline tracking
-- Logic: Build normal behavior patterns for anomaly detection
-
-SYSTEM URL HANDLING:
-- System URLs are trusted URLs configured by the system administrator
-- For system URLs, be more lenient in your assessment
-- Only flag system URLs as malicious if they contain clear attack patterns
-- For system URLs, focus on the content (payload, query parameters, etc.) rather than the URL path
-- Include "is_system_url: true" in your response for system URLs
-
-CONFIDENCE CALCULATION STRATEGY:
-
-Base Assessment:
-- Start with your gut feeling (1-10)
-- Consider request patterns, payload, and behavior
-
-IP Intelligence Boost:
-- Clean IP: +0 points
-- Slightly suspicious IP: +1 point
-- Moderately malicious IP: +2 points  
-- Highly malicious IP: +3 points
-
-Pattern Detection Boost:
-- No previous activity: +0 points
-- Similar benign patterns: +0 points
-- Escalating suspicious patterns: +1-2 points
-- Clear attack progression: +2-3 points
-
-Final Confidence = Base + IP Boost + Pattern Boost
-
-TOOL USAGE DECISION TREE:
-
-REQUEST ANALYSIS:
-├── OBVIOUSLY MALICIOUS (8-10)?
-│   ├── YES: Skip all tools, assign high confidence
-│   └── NO: Continue assessment
-│
-├── BORDERLINE/RECON (4-7)?
-│   ├── YES: Use IP Intelligence tools
-│   │   ├── checkAbuseIPDB(ip) - MANDATORY
-│   │   └── checkVirusTotal(ip) - Optional
-│   └── NO: Continue assessment
-│
-├── AMBIGUOUS/SUSPICIOUS (3-6)?
-│   ├── YES: Use Monitoring tools
-│   │   ├── checkStoredLogs(ip) - MANDATORY
-│   │   └── storeMonitoringLog(...) - MANDATORY
-│   └── NO: Continue assessment
-│
-└── BENIGN (1-2)?
-    └── YES: Store baseline
-        └── storeMonitoringLog(...) - MANDATORY
-
-PATTERN RECOGNITION INDICATORS:
-- Brute Force: Repeated login attempts, high failure rates
-- Reconnaissance: Systematic probing, directory enumeration
-- Escalation: Increasing maliciousness over time
-- Distributed: Multiple IPs, same attack pattern
-- Timing: Unusual request intervals, coordinated attacks
-
-FINAL DECISION FRAMEWORK:
-
-Confidence 8-10 (BLOCKED):
-- Clear malicious intent with evidence
-- High-confidence attack patterns
-- Malicious IP + suspicious request
-
-Confidence 4-7 (MONITORED):
-- Suspicious but not definitive
-- Borderline cases needing observation
-- Unusual patterns worth tracking
-
-Confidence 1-3 (BASELINE):
-- Normal user behavior
-- Legitimate requests
-- Baseline establishment
-
-RESPONSE REQUIREMENTS:
-After your analysis and tool usage, provide:
-
-MALICIOUS: [YES/NO/UNCERTAIN]
-CONFIDENCE: [1-10]
-EXPLANATION: [Your detailed reasoning in 2-3 sentences]
-ATTACK_TYPE: [Type if malicious, or BENIGN if not malicious]
-TOOLS_USED: [List the functions you called]
-INTELLIGENCE_BOOST: [How IP intelligence affected confidence]
-PATTERN_DETECTED: [Any patterns found in monitoring logs]
-
-Remember: Your confidence score IS the blocking mechanism. Be precise, strategic with tools, and leverage the monitoring brain for complex pattern detection.
-
-ANALYZE NOW AND ASSIGN ACCURATE CONFIDENCE SCORE;`
+Your confidence score determines blocking (8+ = blocked). Analyze and respond.`;
     }
 
+    /**
+     * Parse LLM response into structured result
+     */
     parseResponse(response) {
         const result = {
             isMalicious: null,
@@ -687,9 +531,7 @@ ANALYZE NOW AND ASSIGN ACCURATE CONFIDENCE SCORE;`
             shouldBlock: false,
             impact: 'UNKNOWN',
             requiresManualReview: false,
-            intelligenceBoost: '',
-            patternDetected: '',
-            is_system_url: false // Initialize is_system_url attribute
+            is_system_url: false
         };
 
         try {
@@ -698,51 +540,38 @@ ANALYZE NOW AND ASSIGN ACCURATE CONFIDENCE SCORE;`
             const lines = response.split('\n');
 
             for (const line of lines) {
-                const trimmedLine = line.trim();
+                const trimmed = line.trim();
 
-                if (trimmedLine.startsWith('MALICIOUS:')) {
-                    const value = trimmedLine.split(':')[1].trim().toUpperCase();
-                    if (value === 'YES') {
-                        result.isMalicious = true;
-                    } else if (value === 'NO') {
-                        result.isMalicious = false;
-                    } else if (value === 'UNCERTAIN') {
-                        result.isMalicious = null;
-                        result.requiresManualReview = true;
-                    }
-                } else if (trimmedLine.startsWith('CONFIDENCE:')) {
-                    const confValue = trimmedLine.split(':')[1].trim();
-                    result.confidence = parseInt(confValue) || 0;
-                } else if (trimmedLine.startsWith('EXPLANATION:')) {
-                    result.explanation = trimmedLine.split(':').slice(1).join(':').trim();
-                } else if (trimmedLine.startsWith('ATTACK_TYPE:')) {
-                    const attackType = trimmedLine.split(':')[1].trim();
+                if (trimmed.startsWith('MALICIOUS:')) {
+                    const value = trimmed.split(':')[1].trim().toUpperCase();
+                    result.isMalicious = value === 'YES' ? true : value === 'NO' ? false : null;
+                    if (value === 'UNCERTAIN') result.requiresManualReview = true;
+                }
+                else if (trimmed.startsWith('CONFIDENCE:')) {
+                    result.confidence = parseInt(trimmed.split(':')[1].trim()) || 0;
+                }
+                else if (trimmed.startsWith('EXPLANATION:')) {
+                    result.explanation = trimmed.split(':').slice(1).join(':').trim();
+                }
+                else if (trimmed.startsWith('ATTACK_TYPE:')) {
+                    const attackType = trimmed.split(':')[1].trim();
                     result.attackType = attackType === 'BENIGN' ? null : attackType;
-                } else if (trimmedLine.startsWith('INTELLIGENCE_BOOST:')) {
-                    result.intelligenceBoost = trimmedLine.split(':').slice(1).join(':').trim();
-                } else if (trimmedLine.startsWith('PATTERN_DETECTED:')) {
-                    result.patternDetected = trimmedLine.split(':').slice(1).join(':').trim();
-                } 
-                // Check if the LLM identified this as a system URL
-                // This happens when the LLM follows the instructions in the prompt
-                // to include "is_system_url: true" in its response for system URLs
-                else if (trimmedLine.includes('is_system_url: true')) {
+                }
+                else if (trimmed.includes('is_system_url: true')) {
                     result.is_system_url = true;
                 }
             }
 
+            // Set derived properties
             result.shouldBlock = result.confidence >= 8;
 
-            if (result.confidence >= 8) {
-                result.impact = 'HIGH';
-            } else if (result.confidence >= 6) {
-                result.impact = 'MEDIUM';
-            } else if (result.confidence >= 4) {
-                result.impact = 'LOW';
-            } else {
-                result.impact = 'NONE';
-            }
+            // Set impact level
+            if (result.confidence >= 8) result.impact = 'HIGH';
+            else if (result.confidence >= 6) result.impact = 'MEDIUM';
+            else if (result.confidence >= 4) result.impact = 'LOW';
+            else result.impact = 'NONE';
 
+            // Set malicious status based on confidence
             if (result.confidence >= 8) {
                 result.isMalicious = true;
             } else if (result.confidence >= 6) {
@@ -752,14 +581,9 @@ ANALYZE NOW AND ASSIGN ACCURATE CONFIDENCE SCORE;`
                 result.isMalicious = false;
             }
 
-            if (result.explanation === '') {
+            // Fallback explanation
+            if (!result.explanation) {
                 result.explanation = response.trim();
-            }
-
-            if (result.confidence <= 2) {
-                result.requiresManualReview = false;
-            } else if (result.confidence >= 6 && result.confidence < 8) {
-                result.requiresManualReview = true;
             }
 
             console.log('Parsed result:', result);
@@ -773,11 +597,14 @@ ANALYZE NOW AND ASSIGN ACCURATE CONFIDENCE SCORE;`
         return result;
     }
 
+    /**
+     * Test connection to LLM provider
+     */
     async testConnection() {
         try {
             const testPrompt = `Respond with who you are`;
-
             let response;
+
             switch (this.provider) {
                 case 'openai':
                 case 'groq':
@@ -789,12 +616,10 @@ ANALYZE NOW AND ASSIGN ACCURATE CONFIDENCE SCORE;`
                     break;
             }
 
-            const parsed = this.parseResponse(response);
-
             return {
                 success: true,
                 message: `${this.provider} connection successful`,
-                testResponse: parsed
+                testResponse: this.parseResponse(response)
             };
         } catch (error) {
             return {
@@ -805,16 +630,44 @@ ANALYZE NOW AND ASSIGN ACCURATE CONFIDENCE SCORE;`
         }
     }
 
+    /**
+     * Clear all caches
+     */
     clearCache() {
-        this.analysisCache.clear();
-        console.log('LLM analysis cache cleared');
+        this.ipCache.clear();
+        this.requestCache.clear();
+        this.ipRequestQueue.clear();
+        console.log('All caches cleared');
     }
 
+    /**
+     * Get cache statistics
+     */
     getCacheStats() {
         return {
-            size: this.analysisCache.size,
-            maxSize: 1000
+            ipCache: this.ipCache.size,
+            requestCache: this.requestCache.size,
+            queuedIPs: this.ipRequestQueue.size,
+            maxIpCache: 500,
+            maxRequestCache: 1000
         };
+    }
+
+    /**
+     * Get malicious IPs from cache
+     */
+    getMaliciousIPs() {
+        const maliciousIPs = [];
+        for (const [ip, result] of this.ipCache.entries()) {
+            if (result.confidence >= 8) {
+                maliciousIPs.push({
+                    ip,
+                    confidence: result.confidence,
+                    attackType: result.attackType
+                });
+            }
+        }
+        return maliciousIPs;
     }
 }
 
