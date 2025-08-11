@@ -1,5 +1,7 @@
 import {execSync} from 'child_process';
 import axios from "axios";
+
+
 /**
  * Block an IP address using iptables
  * @param {string} ipAddress - The IP address to block
@@ -140,7 +142,7 @@ export async function checkAbuseIPDB(ip) {
 
     if (!abuseIPDBKey) {
         console.warn('AbuseIPDB API key not found in environment variables');
-        return 'AbuseIPDB API key not configured';
+        return 'AbuseIPDB API key not configured - unable to check IP reputation';
     }
 
     try {
@@ -170,7 +172,19 @@ export async function checkAbuseIPDB(ip) {
         };
 
         console.log(`AbuseIPDB result for ${ip}:`, abuseResult);
-        return abuseResult;
+
+        // Return formatted string for LLM consumption instead of raw object
+        const isMalicious = abuseResult.isMalicious;
+        const confidence = abuseResult.abuseConfidence;
+        const reports = abuseResult.totalReports;
+
+        if (isMalicious) {
+            return `AbuseIPDB ALERT: IP ${ip} is flagged as malicious with ${confidence}% abuse confidence based on ${reports} reports. Country: ${abuseResult.country}, Usage: ${abuseResult.usage}`;
+        } else if (reports > 0) {
+            return `AbuseIPDB: IP ${ip} has ${reports} historical reports but low abuse confidence (${confidence}%). Country: ${abuseResult.country}, Usage: ${abuseResult.usage}`;
+        } else {
+            return `AbuseIPDB: IP ${ip} has clean reputation with no abuse reports. Country: ${abuseResult.country}, Usage: ${abuseResult.usage}`;
+        }
 
     } catch (error) {
         console.error('AbuseIPDB check failed:', {
@@ -179,11 +193,9 @@ export async function checkAbuseIPDB(ip) {
             statusText: error.response?.statusText
         });
 
-        return {
-            isMalicious: false,
-            error: `Request failed: ${error.message}`,
-            status: error.response?.status
-        };
+        // Return formatted error string instead of object
+        const status = error.response?.status || 'unknown';
+        return `AbuseIPDB check failed for IP ${ip}: ${error.message} (HTTP ${status}). Unable to determine reputation.`;
     }
 }
 
@@ -201,5 +213,8 @@ export async function testIPCheck(ip = '8.8.8.8') {
     console.log('AbuseIPDB Result:', abuseResult);
 
 
+
+
     return {success: true, message: 'IP check completed successfully'};
 }
+

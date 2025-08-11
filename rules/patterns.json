@@ -16,7 +16,27 @@
       "(\\?.*=.*'\\s*or\\s*'.*'\\s*=\\s*')",
       "(\\?.*=.*'\\s*or\\s*1\\s*=\\s*1)",
       "(user\\s*=\\s*admin\\s*'\\s*--|password\\s*=\\s*'\\s*or\\s*1\\s*=\\s*1)",
-      "(id\\s*=\\s*\\d+\\s*'\\s*or\\s*'1'\\s*=\\s*'1)"
+      "(id\\s*=\\s*\\d+\\s*'\\s*or\\s*'1'\\s*=\\s*'1)",
+      "(version\\s*\\(\\)|@@version|@@hostname|@@datadir)",
+      "(count\\s*\\(\\*\\)|group_concat\\s*\\(|having\\s+1\\s*=\\s*1)",
+      "(load_file\\s*\\(|into\\s+outfile|into\\s+dumpfile)",
+      "(user\\s*\\(\\)|current_user\\s*\\(\\)|session_user\\s*\\(\\))",
+      "(database\\s*\\(\\)|schema\\s*\\(\\))",
+      "(convert\\s*\\(|cast\\s*\\(|substring\\s*\\()",
+      "(waitfor\\s+delay|pg_sleep\\s*\\(|dbms_pipe\\.receive_message)",
+      "((\\%2527)|(\\%252F)|(\\%253A)|(\\%2522))",
+      "(extractvalue\\s*\\(|updatexml\\s*\\(|xmltype\\s*\\()",
+      "('\\s*(union|select|insert|delete|update|drop)\\s*--)",
+      "(;\\s*(shutdown|xp_cmdshell|sp_makewebtask))",
+      "(bulk\\s+insert|openrowset\\s*\\(|opendatasource\\s*\\()",
+      "(md5\\s*\\(|sha1\\s*\\(|password\\s*\\(|encode\\s*\\()",
+      "(-1\\s*(union|select)\\s*--|-1'\\s*(union|select)\\s*--)",
+      "(order\\s+by\\s+\\d+\\s*--|order\\s+by\\s+if\\s*\\()",
+      "(if\\s*\\(\\s*\\d+\\s*=\\s*\\d+|case\\s+when\\s+\\d+\\s*=\\s*\\d+)",
+      "(procedures|routines|triggers|events|columns)",
+      "(master\\.|msdb\\.|tempdb\\.|model\\.)",
+      "(%20union%20|%20select%20|%20from%20|%20where%20)",
+      "(\\bunion\\b.*\\bselect\\b.*\\bfrom\\b)"
     ],
     "score": 8,
     "description": "SQL injection attack patterns"
@@ -36,7 +56,28 @@
       "(\\?.*=.*<script>.*</script>)",
       "(\\?.*=.*alert\\s*\\()",
       "(search\\?q=.*<script>)",
-      "(%3Cscript%3E|%3C/script%3E)"
+      "(%3Cscript%3E|%3C/script%3E)",
+      "(onmouseout\\s*=|onmouseover\\s*=|onkeydown\\s*=|onkeyup\\s*=)",
+      "(onfocus\\s*=|onblur\\s*=|onchange\\s*=|onsubmit\\s*=)",
+      "(oninput\\s*=|onpaste\\s*=|ondrag\\s*=|ondrop\\s*=)",
+      "(<link[^>]*href[^>]*javascript:|<meta[^>]*content[^>]*javascript:)",
+      "(<input[^>]*value[^>]*javascript:|<textarea[^>]*javascript:)",
+      "(src\\s*=\\s*['\"]data:|src\\s*=\\s*['\"]javascript:)",
+      "(style\\s*=\\s*['\"].*expression\\s*\\(|style\\s*=\\s*['\"].*javascript:)",
+      "(\\x3Cscript|\\x3C\\x2Fscript|\\u003Cscript|\\u003C\\u002Fscript)",
+      "(<marquee[^>]*>|<blink[^>]*>|<audio[^>]*autoplay)",
+      "(window\\[|document\\[|location\\[|navigator\\[)",
+      "(constructor|prototype|__proto__|valueOf)",
+      "(innerHTML|outerHTML|innerText|outerText)",
+      "(createElement|appendChild|insertBefore|removeChild)",
+      "(setAttribute|getAttribute|removeAttribute)",
+      "(location\\.href|location\\.replace|location\\.assign)",
+      "(parent\\.|top\\.|frames\\.|self\\.)",
+      "(unescape\\s*\\(|decodeURI\\s*\\(|decodeURIComponent\\s*\\()",
+      "(<details[^>]*open|<summary[^>]*onclick)",
+      "(%26%23|&#x|&#[0-9])",
+      "(\\\\u[0-9a-fA-F]{4}|\\\\x[0-9a-fA-F]{2})",
+      "(%u[0-9a-fA-F]{4}|%[0-9a-fA-F]{2})"
     ],
     "score": 7,
     "description": "Cross-site scripting (XSS) patterns"
@@ -54,7 +95,20 @@
       "(\\?.*input=\\.\\./\\.\\./\\.\\./\\.\\./)",
       "(vulnerable\\.jsp\\?input=.*\\.\\./)",
       "(\\.\\./\\.\\./\\.\\./\\.\\./\\.\\./\\.\\./)",
-      "(/(\\.\\./)+(etc|bin|usr|var|tmp)/)"
+      "(/(\\.\\./)+(etc|bin|usr|var|tmp)/)",
+      "(/proc/self/|/proc/version|/proc/cpuinfo)",
+      "(/var/log/|/var/www/|/usr/local/)",
+      "(/home/[^/]*/|/root/|/tmp/)",
+      "(\\\\etc\\\\|\\\\var\\\\|\\\\usr\\\\|\\\\tmp\\\\)",
+      "(%2e%2e\\\\|%2e%2e/|%2e%2e%5c)",
+      "(....//|....\\\\|..%252f|..%255c)",
+      "(%c0%2e%c0%2e%c0%2f|%c1%1c|%c0%af)",
+      "(..%c0%af|..%c1%9c|..%c1%8s)",
+      "(/WEB-INF/|/META-INF/|/classes/)",
+      "(\\.\\./\\.\\./\\.\\./WEB-INF/web\\.xml)",
+      "(C:\\\\windows\\\\|C:\\\\winnt\\\\|C:\\\\inetpub\\\\)",
+      "(/etc/hosts|/etc/resolv\\.conf|/etc/fstab)",
+      "(/proc/[0-9]+/|/sys/|/dev/)"
     ],
     "score": 9,
     "description": "Directory traversal attack patterns"
@@ -73,7 +127,24 @@
       "(\\?.*cmd=.*id|\\?.*cmd=.*whoami)",
       "(debug\\?cmd=)",
       "(\\(\\)\\s*\\{\\s*:\\s*;\\s*\\}\\s*;)",
-      "(/bin/bash\\s*-c)"
+      "(/bin/bash\\s*-c)",
+      "(;\\s*(rm|del|copy|move|mv|cp)\\s+)",
+      "(\\|\\s*(mail|sendmail|telnet|ssh)\\s+)",
+      "(&\\s*(echo|printf|cat)\\s+)",
+      "(\\$\\(\\s*(id|whoami|uname)\\s*\\))",
+      "(\\`\\s*(ps|netstat|ifconfig)\\s*\\`)",
+      "(&&\\s*(find|locate|which)\\s+)",
+      "(;\\s*export\\s+|;\\s*set\\s+|;\\s*unset\\s+)",
+      "(%3B|%26%26|%7C|%24)",
+      "(0<&196;exec\\s+196<>/dev/tcp/)",
+      "(mkfifo\\s+[^;]+;\\s*nc\\s+)",
+      "(python\\s+-c\\s+['\"].*os\\.system)",
+      "(perl\\s+-e\\s+['\"].*system)",
+      "(ruby\\s+-e\\s+['\"].*system)",
+      "(php\\s+-r\\s+['\"].*system)",
+      "(\\|\\s*base64\\s*-d|\\|\\s*xxd\\s*-r\\s*-p)",
+      "(nohup\\s+.*&|screen\\s+-d\\s+-m)",
+      "(crontab\\s+-|at\\s+now\\s+\\+)"
     ],
     "score": 9,
     "description": "Command injection attack patterns"
@@ -87,11 +158,22 @@
       "(require_once\\s*\\(|virtual\\s*\\()",
       "(base64_decode\\s*\\(|gzinflate\\s*\\()",
       "(allow_url_include|allow_url_fopen)",
-      "(\\?page=|\\?file=|\\?include=|\\?path=)",
+      "(\\?file=|\\?include=|\\?path=)",
       "(\\.\\.%2f|\\.\\.%5c|\\.\\.\\\\)",
       "(\\?page=http://.*\\.txt)",
       "(index\\.php\\?page=http://)",
-      "(shell\\.txt|c99\\.php|r57\\.php)"
+      "(shell\\.txt|c99\\.php|r57\\.php)",
+      "(php://expect|php://fd|php://memory)",
+      "(zip://|compress\\.zlib://|compress\\.bzip2://)",
+      "(rar://|ogg://|expect://)",
+      "(jar://|phar://|glob://)",
+      "(ssh2\\.shell://|ssh2\\.exec://|ssh2\\.tunnel://)",
+      "(%00\\.php|%00\\.txt|\\x00\\.)",
+      "(\\?view=.*\\.\\.%2f|\\?template=.*\\.\\.%2f)",
+      "(\\?skin=.*http://|\\?theme=.*http://)",
+      "(\\?module=.*\\.\\.%2f|\\?action=.*\\.\\.%2f)",
+      "(\\?lang=.*\\.\\.%2f|\\?locale=.*\\.\\.%2f)",
+      "(\\?inc=.*http://|\\?load=.*http://)"
     ],
     "score": 8,
     "description": "File inclusion attack patterns"
@@ -103,7 +185,15 @@
       "(\\{\\s*\\$ne\\s*:|\\{\\s*\\$gt\\s*:)",
       "(this\\s*\\..*==|this\\s*\\..*!=)",
       "(\\|\\|.*==|&&.*==|sleep\\s*\\(.*\\))",
-      "(true}|false}|null}|undefined})"
+      "(true}|false}|null}|undefined})",
+      "(\\$gte\\s*:|\\$lte\\s*:|\\$nin\\s*:|\\$mod\\s*:)",
+      "(\\$all\\s*:|\\$size\\s*:|\\$type\\s*:)",
+      "(\\$elemMatch\\s*:|\\$slice\\s*:)",
+      "(\\$or\\s*:\\s*\\[|\\$and\\s*:\\s*\\[|\\$nor\\s*:\\s*\\[)",
+      "(\\$not\\s*:|\\$comment\\s*:)",
+      "(constructor\\.constructor|__proto__)",
+      "(this\\s*\\[.*\\]\\s*==|this\\s*\\[.*\\]\\s*!=)",
+      "(return\\s+.*==|return\\s+.*!=)"
     ],
     "score": 7,
     "description": "NoSQL injection attack patterns"
@@ -114,7 +204,12 @@
       "(\\)\\(|\\(\\)|\\(\\()",
       "(\\|\\(|\\&\\(|\\!\\()",
       "(cn=\\*|ou=\\*|dc=\\*)",
-      "(objectClass=\\*|mail=\\*)"
+      "(objectClass=\\*|mail=\\*)",
+      "(\\(\\s*\\|\\s*\\(|\\(\\s*\\&\\s*\\()",
+      "(\\*\\)\\(|\\*\\)\\))",
+      "(uid=\\*|sn=\\*|givenName=\\*)",
+      "(\\(\\!\\(objectClass=\\*\\)\\))",
+      "(\\(\\&\\(objectClass=\\*\\)\\(cn=\\*\\)\\))"
     ],
     "score": 7,
     "description": "LDAP injection attack patterns"
@@ -125,19 +220,86 @@
       "\\b(10\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}|192\\.168\\.\\d{1,3}\\.\\d{1,3}|169\\.254\\.\\d{1,3}\\.\\d{1,3})\\b",
       "(172\\.(1[6-9]|2[0-9]|3[01])\\.\\d{1,3}\\.\\d{1,3})",
       "(file://|dict://|gopher://|ldap://|ftp://|smb://|scp://)",
-      "(\\@localhost|\\@127\\.0\\.0\\.1|\\@\\[::1\\]|\\@0\\.0\\.0\\.0)"
+      "(\\@localhost|\\@127\\.0\\.0\\.1|\\@\\[::1\\]|\\@0\\.0\\.0\\.0)",
+      "(http://localhost|https://localhost)",
+      "(http://127\\.0\\.0\\.1|https://127\\.0\\.0\\.1)",
+      "(http://0\\.0\\.0\\.0|https://0\\.0\\.0\\.0)",
+      "(\\[::\\]|\\[::1\\]|\\[::ffff:)",
+      "(metadata\\.google\\.internal|169\\.254\\.169\\.254)",
+      "(ec2-.*\\.compute\\.amazonaws\\.com)",
+      "(169\\.254\\.170\\.2|100\\.64\\.)",
+      "(curl\\s+.*http://.*localhost)",
+      "(wget\\s+.*http://.*localhost)"
     ],
     "score": 8,
     "description": "Server-side request forgery patterns"
+  },
+  "xml_injection": {
+    "patterns": [
+      "(<!ENTITY|<!DOCTYPE|<!ELEMENT)",
+      "(SYSTEM\\s+['\"]|PUBLIC\\s+['\"])",
+      "(&#[0-9]+;|&#x[0-9a-fA-F]+;)",
+      "(<\\?xml|<\\?XML)",
+      "(<!\\[CDATA\\[|\\]\\]>)",
+      "(<!ENTITY.*file://|<!ENTITY.*http://)",
+      "(<!ENTITY.*php://|<!ENTITY.*data://)",
+      "(%26%23|%3C%21ENTITY|%3C%21DOCTYPE)"
+    ],
+    "score": 7,
+    "description": "XML injection and XXE attack patterns"
+  },
+  "deserialization": {
+    "patterns": [
+      "(rO0AB|aced0005|java\\.lang\\.Runtime)",
+      "(\\$\\{jndi:|\\$\\{ldap:|\\$\\{rmi:)",
+      "(ObjectInputStream|readObject|writeObject)",
+      "(pickle\\.loads|pickle\\.load|cPickle)",
+      "(__reduce__|__reduce_ex__|__getstate__)",
+      "(eval\\s*\\(.*pickle|exec\\s*\\(.*pickle)",
+      "(base64.*rO0AB|base64.*YWNlZA)",
+      "(H4sIA|1f8b08|504b0304)"
+    ],
+    "score": 9,
+    "description": "Insecure deserialization attack patterns"
   },
   "csrf": {
     "patterns": [
       "(csrf_token=|authenticity_token=)",
       "(state=|nonce=|_token=)",
-      "(X-CSRF-Token|X-Requested-With)"
+      "(X-CSRF-Token|X-Requested-With)",
+      "(<img[^>]*src[^>]*\\/admin\\/|<form[^>]*action[^>]*\\/admin\\/)",
+      "(<iframe[^>]*src[^>]*\\/transfer|<iframe[^>]*src[^>]*\\/delete)"
     ],
     "score": 5,
     "description": "CSRF token bypass attempts"
+  },
+  "xxe": {
+    "patterns": [
+      "(<!ENTITY.*SYSTEM|<!ENTITY.*PUBLIC)",
+      "(<!ENTITY.*file://|<!ENTITY.*http://)",
+      "(<!ENTITY.*php://|<!ENTITY.*expect://)",
+      "(LIBXML_NOENT|LIBXML_DTDLOAD)",
+      "(simplexml_load|DOMDocument)",
+      "(<!\\[CDATA\\[.*\\]\\]>)",
+      "(%26%23x|%26%23[0-9])",
+      "(<!ENTITY.*data://)"
+    ],
+    "score": 8,
+    "description": "XML External Entity (XXE) attack patterns"
+  },
+  "template_injection": {
+    "patterns": [
+      "(\\{\\{.*\\}\\}|\\{%.*%\\})",
+      "(\\$\\{.*\\}|#\\{.*\\})",
+      "(<%.*%>|<\\?.*\\?>)",
+      "(__import__|getattr|setattr)",
+      "(config\\.|self\\.|request\\.)",
+      "(\\[\\[.*\\]\\]|<%=.*%>)",
+      "(render_template_string|Template\\(\\.\\*\\)\\.render)",
+      "(\\{\\{7\\*7\\}\\}|\\{\\{config\\}\\})"
+    ],
+    "score": 8,
+    "description": "Server-side template injection patterns"
   },
   "scanner_identification": {
     "patterns": [
@@ -148,7 +310,15 @@
       "(scanner|crawl|bot|spider)",
       "(nmap|masscan|zmap)",
       "(dirb|dirbuster|gobuster)",
-      "(burp|intruder|repeater)"
+      "(burp|intruder|repeater)",
+      "(acunetix|nessus|openvas|qualys)",
+      "(w3af|skipfish|wapiti|arachni)",
+      "(hydra|medusa|brutus|thc)",
+      "(metasploit|msfconsole|meterpreter)",
+      "(havij|pangolin|safe3si|bbqsql)",
+      "(commix|tplmap|nosqlmap)",
+      "(subfinder|amass|dnsrecon)",
+      "(ffuf|wfuzz|feroxbuster)"
     ],
     "score": 6,
     "description": "Security scanner and tool identification"
@@ -161,7 +331,15 @@
       "(/dashboard|/panel|/cpanel)",
       "(/login|/signin)",
       "(/config|/configuration|/settings)",
-      "(/wp-login\\Details.php|/wp-config\\.php)"
+      "(/wp-login\\Details.php|/wp-config\\.php)",
+      "(/admin\\.php|/admin/index|/admin/login)",
+      "(/controlpanel|/cp|/webadmin)",
+      "(/adminer|/adminer\\.php)",
+      "(/management|/admin-console)",
+      "(/server-info|/server-status)",
+      "(/status|/stats|/info|/health)",
+      "(/debug|/test|/dev)",
+      "(/api/admin|/api/v1/admin)"
     ],
     "score": 4,
     "description": "Administrative interface probing"
@@ -174,7 +352,17 @@
       "(/readme\\.txt|/changelog\\.txt)",
       "(/robots\\.txt|/sitemap\\.xml)",
       "(/web\\.config|/app\\.config)",
-      "(/install\\.php|/setup\\.php)"
+      "(/install\\.php|/setup\\.php)",
+      "(/\\.git/|/\\.svn/|\\.hg/)",
+      "(/\\.DS_Store|/thumbs\\.db)",
+      "(/composer\\.json|/package\\.json)",
+      "(/yarn\\.lock|/package-lock\\.json)",
+      "(/Dockerfile|/docker-compose\\.yml)",
+      "(/\\.env\\.local|\\.env\\.production)",
+      "(/secrets\\.yml|/credentials\\.yml)",
+      "(/id_rsa|/id_dsa|/authorized_keys)",
+      "(/phpinfo\\.php|/info\\.php)",
+      "(/crossdomain\\.xml|/clientaccesspolicy\\.xml)"
     ],
     "score": 5,
     "description": "Sensitive file access attempts"
@@ -187,7 +375,11 @@
       "(login failed|login error)",
       "(bad password|wrong password)",
       "(access denied|permission denied)",
-      "(too many failed attempts)"
+      "(too many failed attempts)",
+      "(account locked|account disabled)",
+      "(maximum login attempts|rate limit exceeded)",
+      "(suspicious login activity)",
+      "(multiple failed logins)"
     ],
     "score": 6,
     "description": "Brute force attack indicators"
@@ -201,7 +393,15 @@
       "(perl\\s+-e.*socket.*exec)",
       "(ruby\\s+-rsocket)",
       "(/bin/sh\\s+-i)",
-      "(exec\\s+5<>/dev/tcp/)"
+      "(exec\\s+5<>/dev/tcp/)",
+      "(telnet\\s+\\d+\\.\\d+\\.\\d+\\.\\d+\\s+\\d+\\s*\\|\\s*/bin/bash)",
+      "(socat\\s+.*exec)",
+      "(awk\\s+.*inet)",
+      "(ncat\\s+.*-e\\s*/bin/bash)",
+      "(mknod\\s+backpipe\\s+p)",
+      "(0<&196;exec\\s+196<>/dev/tcp/)",
+      "(python.*-c.*import\\s+socket.*subprocess)",
+      "(php\\s+-r.*fsockopen.*exec)"
     ],
     "score": 10,
     "description": "Reverse shell attempt patterns"
@@ -213,7 +413,15 @@
       "(/wp-json/|/xmlrpc\\.php)",
       "(/revslider/|/revolution/)",
       "(/plugins/|/themes/|/uploads/)",
-      "(wp_user|wp_posts|wp_options)"
+      "(wp_user|wp_posts|wp_options)",
+      "(/wp-content/uploads/.*\\.php)",
+      "(/wp-admin/admin-ajax\\.php)",
+      "(/wp-cron\\.php|/wp-trackback\\.php)",
+      "(/wp-comments-post\\.php)",
+      "(/wp-content/debug\\.log)",
+      "(/?author=1|/?author=\\d+)",
+      "(/\\?rest_route=)",
+      "(/wp-json/wp/v2/users)"
     ],
     "score": 4,
     "description": "WordPress-specific attack patterns"
@@ -223,9 +431,325 @@
       "(\\(\\)\\s*\\{\\s*:\\s*;\\s*\\}\\s*;)",
       "(bash_func_.*%%)",
       "(/bin/bash\\s*-c\\s*['\"]echo\\s+hacked)",
-      "(CGI.*\\(\\).*\\{.*\\}.*echo)"
+      "(CGI.*\\(\\).*\\{.*\\}.*echo)",
+      "(\\(\\)\\s*\\{\\s*ignored;\\s*\\}\\s*;)",
+      "(\\(\\)\\s*\\{\\s*x\\s*;\\s*\\}\\s*;)"
     ],
     "score": 9,
     "description": "Shellshock vulnerability exploitation"
+  },
+  "log4j": {
+    "patterns": [
+      "(\\$\\{jndi:ldap://)",
+      "(\\$\\{jndi:rmi://)",
+      "(\\$\\{jndi:dns://)",
+      "(\\$\\{jndi:http://)",
+      "(\\$\\{jndi:\\$\\{lower:l\\})",
+      "(\\$\\{:\\$\\{env:NaN:-j\\})",
+      "(\\$\\{\\$\\{env:BARFOO:-j\\}ndi)",
+      "(\\$\\{base64:JHtqbmRpOmxkYXA)",
+      "(\\$\\{\\$\\{date:'j'\\}\\$\\{date:'n'\\}\\$\\{date:'d'\\}\\$\\{date:'i'\\})"
+    ],
+    "score": 10,
+    "description": "Log4j vulnerability exploitation (Log4Shell)"
+  },
+  "protocol_smuggling": {
+    "patterns": [
+      "(Transfer-Encoding:\\s*chunked)",
+      "(Content-Length:\\s*0.*Transfer-Encoding)",
+      "(\\r\\n\\r\\n.*HTTP/)",
+      "(Connection:\\s*close.*Connection:\\s*keep-alive)",
+      "(POST.*HTTP/1\\.1.*GET)",
+      "(Content-Length:\\s*\\d+.*Content-Length:\\s*\\d+)"
+    ],
+    "score": 8,
+    "description": "HTTP request smuggling patterns"
+  },
+  "api_abuse": {
+    "patterns": [
+      "(/api/v\\d+/admin|/api/internal/)",
+      "(/graphql.*query.*\\{.*\\})",
+      "(/api.*\\?.*=.*\\.\\.%2f)",
+      "(/rest/api/.*admin|/api/.*debug)",
+      "(X-HTTP-Method-Override:\\s*(DELETE|PUT))",
+      "(X-Original-HTTP-Method:\\s*(DELETE|PUT))",
+      "(_method=(DELETE|PUT|PATCH))",
+      "(/api/.*\\?callback=.*<script>)",
+      "(/swagger|/api-docs|/openapi\\.json)"
+    ],
+    "score": 6,
+    "description": "API abuse and enumeration patterns"
+  },
+  "jwt_attacks": {
+    "patterns": [
+      "(alg[\"']\\s*:\\s*[\"']none[\"'])",
+      "(eyJ[A-Za-z0-9_-]*\\.[A-Za-z0-9_-]*\\.)",
+      "(\\\"alg\\\"\\s*:\\s*\\\"RS256\\\"|\\\"alg\\\"\\s*:\\s*\\\"HS256\\\")",
+      "(kid[\"']\\s*:\\s*[\"']/dev/null[\"'])",
+      "(kid[\"']\\s*:\\s*[\"']\\.\\./\\.\\./)",
+      "(jku[\"']\\s*:\\s*[\"']http://)",
+      "(x5u[\"']\\s*:\\s*[\"']http://)"
+    ],
+    "score": 7,
+    "description": "JSON Web Token manipulation attacks"
+  },
+  "race_conditions": {
+    "patterns": [
+      "(sleep\\s*\\(\\s*[0-9]+\\s*\\)|usleep\\s*\\()",
+      "(time\\s*\\(\\s*\\).*time\\s*\\(\\s*\\))",
+      "(concurrent.*request|parallel.*request)",
+      "(race.*condition|timing.*attack)",
+      "(\\?delay=\\d+|\\&delay=\\d+)"
+    ],
+    "score": 6,
+    "description": "Race condition exploitation attempts"
+  },
+  "business_logic": {
+    "patterns": [
+      "(price\\s*=\\s*-\\d+|amount\\s*=\\s*-\\d+)",
+      "(quantity\\s*=\\s*-\\d+|qty\\s*=\\s*-\\d+)",
+      "(\\?admin=true|\\&admin=true)",
+      "(\\?debug=true|\\&debug=true)",
+      "(\\?test=true|\\&test=true)",
+      "(role\\s*=\\s*admin|user_type\\s*=\\s*admin)",
+      "(is_admin\\s*=\\s*1|admin\\s*=\\s*1)",
+      "(bypass\\s*=\\s*1|skip\\s*=\\s*1)"
+    ],
+    "score": 7,
+    "description": "Business logic bypass attempts"
+  },
+  "webshell_patterns": {
+    "patterns": [
+      "(system\\s*\\(\\s*\\$_GET|system\\s*\\(\\s*\\$_POST)",
+      "(exec\\s*\\(\\s*\\$_GET|exec\\s*\\(\\s*\\$_POST)",
+      "(shell_exec\\s*\\(\\s*\\$_GET|shell_exec\\s*\\(\\s*\\$_POST)",
+      "(passthru\\s*\\(\\s*\\$_GET|passthru\\s*\\(\\s*\\$_POST)",
+      "(eval\\s*\\(\\s*\\$_GET|eval\\s*\\(\\s*\\$_POST)",
+      "(assert\\s*\\(\\s*\\$_GET|assert\\s*\\(\\s*\\$_POST)",
+      "(\\$_GET\\[.*\\]\\s*\\(|\\$_POST\\[.*\\]\\s*\\()",
+      "(c99|r57|wso|b374k|adminer)",
+      "(\\$GLOBALS\\[.*\\]\\s*\\()",
+      "(create_function\\s*\\(.*\\$_)",
+      "(preg_replace\\s*\\(.*\\/e.*\\$_)"
+    ],
+    "score": 9,
+    "description": "Web shell detection patterns"
+  },
+  "idor_patterns": {
+    "patterns": [
+      "(\\?id=\\d+.*&.*id=\\d+)",
+      "(\\?user_id=\\d+|\\?uid=\\d+)",
+      "(\\?account=\\d+|\\?account_id=\\d+)",
+      "(\\?doc=\\d+|\\?document_id=\\d+)",
+      "(\\?file_id=\\d+|\\?fid=\\d+)",
+      "(\\?order_id=\\d+|\\?invoice_id=\\d+)",
+      "(\\?profile_id=\\d+|\\?member_id=\\d+)"
+    ],
+    "score": 5,
+    "description": "Insecure Direct Object Reference patterns"
+  },
+  "crypto_attacks": {
+    "patterns": [
+      "(padding\\s*=\\s*pkcs1|padding\\s*=\\s*oaep)",
+      "(cipher\\s*=\\s*des|cipher\\s*=\\s*3des)",
+      "(algorithm\\s*=\\s*md5|hash\\s*=\\s*md5)",
+      "(iv\\s*=\\s*0+|initialization_vector\\s*=\\s*0+)",
+      "(key\\s*=\\s*[0]+|secret\\s*=\\s*[0]+)",
+      "(random\\s*=\\s*false|secure\\s*=\\s*false)"
+    ],
+    "score": 6,
+    "description": "Cryptographic attack patterns"
+  },
+  "dns_rebinding": {
+    "patterns": [
+      "(localhost\\..*\\.|127\\.0\\.0\\.1\\..*\\.)",
+      "(\\b\\d{1,3}-\\d{1,3}-\\d{1,3}-\\d{1,3}\\b)",
+      "(nip\\.io|xip\\.io|sslip\\.io)",
+      "(10-\\d+-\\d+-\\d+\\.|192-168-)",
+      "(172-1[6-9]-|172-2[0-9]-|172-3[01]-)"
+    ],
+    "score": 7,
+    "description": "DNS rebinding attack patterns"
+  },
+  "clickjacking": {
+    "patterns": [
+      "(X-Frame-Options:\\s*DENY|X-Frame-Options:\\s*SAMEORIGIN)",
+      "(frameborder\\s*=\\s*[\"']0[\"'].*opacity\\s*:\\s*0)",
+      "(position\\s*:\\s*absolute.*z-index\\s*:\\s*-?\\d+)",
+      "(iframe.*style.*opacity\\s*:\\s*0)",
+      "(<iframe[^>]*src[^>]*admin[^>]*style[^>]*opacity)"
+    ],
+    "score": 5,
+    "description": "Clickjacking attack patterns"
+  },
+  "cve_exploits": {
+    "patterns": [
+      "(struts.*action.*redirect|struts.*\\.action)",
+      "(spring.*whitelabel.*error)",
+      "(apache.*struts.*content-type)",
+      "(heartbleed|openssl.*heartbeat)",
+      "(cve-20\\d{2}-\\d{4}|CVE-20\\d{2}-\\d{4})",
+      "(exploit.*cve|payload.*cve)",
+      "(vulnerability.*20\\d{2}|vuln.*20\\d{2})"
+    ],
+    "score": 8,
+    "description": "Known CVE exploitation patterns"
+  },
+  "ssti_advanced": {
+    "patterns": [
+      "(\\{\\{.*class.*mro.*\\}\\})",
+      "(\\{\\{.*config.*items.*\\}\\})",
+      "(\\{\\{.*request.*application.*\\}\\})",
+      "(\\{\\%.*for.*in.*config.*\\%\\})",
+      "(\\{\\{.*lipsum.*attr.*\\}\\})",
+      "(\\{\\{.*cycler.*attr.*\\}\\})",
+      "(\\{\\{.*joiner.*attr.*\\}\\})",
+      "(\\{\\{.*namespace.*attr.*\\}\\})"
+    ],
+    "score": 9,
+    "description": "Advanced Server-Side Template Injection"
+  },
+  "mass_assignment": {
+    "patterns": [
+      "(user\\[admin\\]|user\\[role\\])",
+      "(account\\[balance\\]|account\\[credit\\])",
+      "(profile\\[permissions\\]|profile\\[access\\])",
+      "(model\\[id\\]|model\\[created_at\\])",
+      "(\\[is_admin\\]|\\[is_verified\\])",
+      "(\\[user_type\\]|\\[account_type\\])"
+    ],
+    "score": 6,
+    "description": "Mass assignment vulnerability patterns"
+  },
+  "prototype_pollution": {
+    "patterns": [
+      "(__proto__|constructor\\.prototype)",
+      "(\\[\\\"__proto__\\\"\\]|\\[\\'__proto__\\'\\])",
+      "(\\[constructor\\]\\[prototype\\])",
+      "(Object\\.prototype|Array\\.prototype)",
+      "(prototype\\[\\'\\w+\\'\\]|prototype\\[\\\"\\w+\\\"\\])",
+      "(%5F%5Fproto%5F%5F|__proto__)"
+    ],
+    "score": 7,
+    "description": "Prototype pollution attack patterns"
+  },
+  "timing_attacks": {
+    "patterns": [
+      "(sleep\\s*\\(\\s*if\\s*\\(|sleep\\s*\\(\\s*case\\s*when)",
+      "(benchmark\\s*\\(\\s*\\d+.*select)",
+      "(waitfor\\s+delay\\s+['\"]\\d{2}:\\d{2}:\\d{2}['\"])",
+      "(pg_sleep\\s*\\(\\s*extract)",
+      "(response_time|timing.*measurement|latency.*test)"
+    ],
+    "score": 7,
+    "description": "SQL timing attack patterns"
+  },
+  "cache_poisoning": {
+    "patterns": [
+      "(X-Forwarded-Host:\\s*evil\\.com)",
+      "(X-Original-URL:|X-Rewrite-URL:)",
+      "(X-HTTP-Method-Override:\\s*GET)",
+      "(Host:\\s*localhost.*X-Forwarded-Host:)",
+      "(Cache-Control:\\s*no-cache.*Vary:)"
+    ],
+    "score": 6,
+    "description": "Cache poisoning attack patterns"
+  },
+  "graphql_attacks": {
+    "patterns": [
+      "(query.*\\{.*user.*\\{.*password.*\\})",
+      "(mutation.*\\{.*deleteUser.*\\})",
+      "(\\{.*__schema.*\\{.*types.*\\})",
+      "(\\{.*__type.*\\(name:.*\\).*\\{)",
+      "(query.*\\{.*admin.*\\{.*secret.*\\})",
+      "(fragment.*on.*User.*\\{.*sensitive.*\\})",
+      "(query.*depth.*[5-9]\\d+.*\\{)"
+    ],
+    "score": 7,
+    "description": "GraphQL injection and enumeration"
+  },
+  "http_splitting": {
+    "patterns": [
+      "(%0d%0a|%0a%0d|\\r\\n|\\n\\r)",
+      "(%0d%0aSet-Cookie:|%0a%0dSet-Cookie:)",
+      "(%0d%0aLocation:|%0a%0dLocation:)",
+      "(%0d%0aContent-Type:|%0a%0dContent-Type:)",
+      "(\\r\\nSet-Cookie:|\\n\\rSet-Cookie:)",
+      "(\\r\\nHTTP/1\\.|\\n\\rHTTP/1\\.)"
+    ],
+    "score": 8,
+    "description": "HTTP response splitting patterns"
+  },
+  "malicious_redirects": {
+    "patterns": [
+      "(redirect.*=.*http://|redirect.*=.*https://)",
+      "(url.*=.*http://evil|url.*=.*https://evil)",
+      "(next.*=.*http://|return.*=.*http://)",
+      "(goto.*=.*http://|target.*=.*http://)",
+      "(continue.*=.*http://|forward.*=.*http://)",
+      "(location.*=.*//evil|location.*=.*\\\\\\\\/\\\\\\\\/)"
+    ],
+    "score": 6,
+    "description": "Open redirect exploitation patterns"
+  },
+  "malicious_uploads": {
+    "patterns": [
+      "(filename.*\\.php|filename.*\\.jsp)",
+      "(filename.*\\.asp|filename.*\\.aspx)",
+      "(filename.*\\.phtml|filename.*\\.php5)",
+      "(Content-Type:.*image.*filename.*\\.php)",
+      "(GIF89.*<\\?php|PNG.*<\\?php)",
+      "(filename.*\\.htaccess|filename.*\\.config)",
+      "(filename.*%00\\.jpg|filename.*\\x00\\.)"
+    ],
+    "score": 8,
+    "description": "Malicious file upload patterns"
+  },
+  "social_engineering": {
+    "patterns": [
+      "(urgent.*security|immediate.*action.*required)",
+      "(verify.*account.*suspended|confirm.*identity)",
+      "(click.*here.*now|download.*attachment)",
+      "(security.*alert.*microsoft|apple.*security)",
+      "(your.*account.*compromised|suspicious.*activity)"
+    ],
+    "score": 4,
+    "description": "Social engineering attempt indicators"
+  },
+  "exfiltration_patterns": {
+    "patterns": [
+      "(select.*into.*outfile|select.*into.*dumpfile)",
+      "(copy.*to.*program|copy.*from.*program)",
+      "(\\|.*curl.*http://|\\|.*wget.*http://)",
+      "(base64.*\\|.*curl|hex.*\\|.*nc)",
+      "(dns.*exfil|subdomain.*data)",
+      "(http.*beacon|periodic.*callback)"
+    ],
+    "score": 9,
+    "description": "Data exfiltration attempt patterns"
+  },
+  "privilege_escalation": {
+    "patterns": [
+      "(sudo\\s+-u|su\\s+-|sudo\\s+su)",
+      "(chmod\\s+777|chmod\\s+\\+s)",
+      "(chown\\s+root|usermod\\s+-a)",
+      "(passwd\\s+root|shadow\\s+file)",
+      "(setuid\\s+binary|sticky\\s+bit)",
+      "(/etc/sudoers|/etc/passwd.*:0:)"
+    ],
+    "score": 8,
+    "description": "Privilege escalation attempt patterns"
+  },
+  "persistence_mechanisms": {
+    "patterns": [
+      "(crontab\\s+-e|at\\s+now|systemctl.*enable)",
+      "(\\.bashrc|\\.bash_profile|\\.zshrc)",
+      "(/etc/rc\\.|/etc/init\\.d/)",
+      "(startup.*script|autostart.*entry)",
+      "(registry.*run|startup.*folder)",
+      "(persistence.*payload|backdoor.*install)"
+    ],
+    "score": 7,
+    "description": "Persistence mechanism establishment"
   }
 }

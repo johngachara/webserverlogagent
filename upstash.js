@@ -403,46 +403,6 @@ export async function cleanupCorruptedEntries(keyPrefix = 'monitoring_log') {
  * @param {string} explanation - LLM explanation
  * @returns {Promise<Object>} - Success/error response with details
  */
-export async function storeMonitoringLog(logEntry, confidenceScore, explanation) {
-    console.log('=== storeMonitoringLog called ===');
-    console.log('Input params:', {
-        logEntry: JSON.stringify(logEntry, null, 2),
-        confidenceScore,
-        explanation
-    });
-
-    // Fixed parameter order to match storeThreatLog signature
-    const result = await storeThreatLog(logEntry, explanation, confidenceScore, 'monitoring_log');
-
-    if (result.success) {
-        console.log('Storage successful:', JSON.stringify({
-            key: result.key,
-            stored_data: result.data,
-            expires_in: result.expiresIn
-        }, null, 2));
-
-        // Return enhanced result for LLM
-        return {
-            ...result,
-            message: `Successfully stored monitoring log for IP ${logEntry.ip}`,
-            stored_at: new Date().toISOString(),
-            monitoring_active: true
-        };
-    }
-
-    console.log('Storage failed:', result);
-    console.log('=== storeMonitoringLog completed ===');
-    return result;
-}
-
-/**
- * LLM-friendly wrapper for checking stored logs
- * This function is designed to be called by the LLM via function calling
- * Returns properly serialized data that the LLM can read
- *
- * @param {string} ipAddress - IP address to check
- * @returns {Promise<Object>} - Existing logs with readable data
- */
 export async function checkStoredLogs(ipAddress) {
     console.log('=== checkStoredLogs called ===');
     console.log('IP Address:', ipAddress);
@@ -493,7 +453,113 @@ export async function checkStoredLogs(ipAddress) {
     console.log('=== checkStoredLogs completed ===');
     return result;
 }
+export async function storeMonitoringLog(logEntry, confidenceScore, explanation) {
+    console.log('=== storeMonitoringLog called ===');
+    console.log('Input params:', {
+        logEntry: JSON.stringify(logEntry, null, 2),
+        confidenceScore,
+        explanation
+    });
 
+    // Store the current log entry first
+    const storeResult = await storeThreatLog(logEntry, explanation, confidenceScore, 'monitoring_log');
+
+    if (storeResult.success) {
+        console.log('Storage successful:', JSON.stringify({
+            key: storeResult.key,
+            stored_data: storeResult.data,
+            expires_in: storeResult.expiresIn
+        }, null, 2));
+
+        // Check for other stored logs for this IP
+        console.log('Checking for other occurrences for IP:', logEntry.ip);
+        const otherLogs = await checkStoredLogs(logEntry.ip);
+
+        let otherOccurrences = null;
+        let summaryInfo = [];
+
+        // Build basic storage info
+        summaryInfo.push(`MONITORING LOG STORED: IP ${logEntry.ip} at ${new Date().toISOString()}`);
+        summaryInfo.push(`Threat Level: ${confidenceScore}/10 - ${explanation}`);
+        summaryInfo.push(`Request: ${logEntry.method} ${logEntry.url}`);
+        summaryInfo.push(`User Agent: ${logEntry.userAgent || 'Not provided'}`);
+
+        if (otherLogs.success && otherLogs.data && otherLogs.data.length > 1) {
+            // Filter out the just-stored entry (it will be the most recent one)
+            const previousLogs = otherLogs.data.slice(1);
+
+            otherOccurrences = {
+                count: previousLogs.length,
+                data: previousLogs,
+                summary: `Found ${previousLogs.length} other monitoring entries for IP ${logEntry.ip}`,
+                pattern_info: {
+                    urls_accessed: [...new Set(previousLogs.map(item => item.url))],
+                    methods_used: [...new Set(previousLogs.map(item => item.method))],
+                    date_range: {
+                        oldest: previousLogs[previousLogs.length - 1]?.timestamp,
+                        newest: previousLogs[0]?.timestamp
+                    }
+                }
+            };
+
+            // Add pattern analysis to summary
+            summaryInfo.push('\n--- PREVIOUS OCCURRENCES DETECTED ---');
+            summaryInfo.push(`Total previous incidents: ${previousLogs.length}`);
+            summaryInfo.push(`Date range: ${otherOccurrences.pattern_info.date_range.oldest} to ${otherOccurrences.pattern_info.date_range.newest}`);
+            summaryInfo.push(`Unique URLs targeted: ${otherOccurrences.pattern_info.urls_accessed.length} (${otherOccurrences.pattern_info.urls_accessed.join(', ')})`);
+            summaryInfo.push(`HTTP methods used: ${otherOccurrences.pattern_info.methods_used.join(', ')}`);
+
+            // Add threat escalation warning
+            if (previousLogs.length >= 3) {
+                summaryInfo.push('⚠️  HIGH FREQUENCY ALERT: This IP has 3+ monitoring events - consider blocking if requests are malicious');
+            } else if (previousLogs.length >= 1) {
+                summaryInfo.push('⚠️  REPEAT OFFENDER: This IP has been flagged before - monitor closely');
+            }
+        } else {
+            summaryInfo.push('\n--- OCCURRENCE STATUS ---');
+            summaryInfo.push('First-time detection for this IP address');
+        }
+
+        // Create comprehensive string summary for LLM consumption
+        const comprehensiveSummary = summaryInfo.join('\n');
+
+        // Return enhanced result optimized for LLM tools
+        return {
+            success: true,
+            message: comprehensiveSummary,
+            key: storeResult.key,
+            stored_at: new Date().toISOString(),
+            monitoring_active: true,
+            threat_score: confidenceScore,
+            ip_address: logEntry.ip,
+            is_repeat_offender: otherOccurrences !== null,
+            previous_incident_count: otherOccurrences?.count || 0,
+            risk_level: otherOccurrences?.count >= 3 ? 'HIGH' : otherOccurrences?.count >= 1 ? 'MEDIUM' : 'LOW',
+            pattern_analysis: otherOccurrences?.pattern_info || null,
+            recommendation: otherOccurrences?.count >= 3
+                ? 'IMMEDIATE ACTION: Consider IP blocking due to repeated violations'
+                : otherOccurrences?.count >= 1
+                    ? 'MONITOR: Increased surveillance recommended for repeat offender'
+                    : 'BASELINE: Continue standard monitoring protocols',
+            raw_data: {
+                current_log: logEntry,
+                storage_result: storeResult,
+                historical_logs: otherOccurrences
+            }
+        };
+    }
+
+    console.log('Storage failed:', storeResult);
+    console.log('=== storeMonitoringLog completed ===');
+
+    // Return failure info in string format for LLM
+    return {
+        success: false,
+        message: `STORAGE FAILED for IP ${logEntry.ip}: ${storeResult.error || 'Unknown error occurred'}. Unable to store monitoring log entry.`,
+        error: storeResult.error,
+        timestamp: new Date().toISOString()
+    };
+}
 /**
  * LLM-friendly wrapper for retrieving all monitoring logs
  * This function is designed to be called by the LLM via function calling
@@ -582,5 +648,5 @@ export async function testRedisOperations() {
     }
 }
 
-// Export additional utility functions for direct use
+
 export { testRedisConnection, getAllThreatLogs, getThreatLog };
