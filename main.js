@@ -4,7 +4,7 @@ import winston from 'winston';
 import LogParser from './logparser.js';
 import ThreatDetector from './threatdetector.js';
 import LLMAnalyzer from './llmanalyzer.js';
-import PushoverNotifier from './pushover.js';
+// import PushoverNotifier from './pushover.js'; stopped using
 import { blockIpAddress } from './llmtools.js';
 import { createClient } from '@supabase/supabase-js';
 
@@ -60,10 +60,10 @@ class LogSecurityAgent {
         this.logParser = new LogParser(this.config.logs, this.onLogEntry.bind(this));
         this.threatDetector = new ThreatDetector(this.config.thresholds);
         this.llmAnalyzer = new LLMAnalyzer(process.env.CEREBRAS_API_KEY,'cerebras');
-        this.pushOverNotification = new PushoverNotifier(
-            process.env.PUSHOVERUSERKEY,
-            process.env.PUSHOVERAPPTOKEN
-        );
+        // this.pushOverNotification = new PushoverNotifier(
+        //     process.env.PUSHOVERUSERKEY,
+        //     process.env.PUSHOVERAPPTOKEN
+        // );
     }
 
     /**
@@ -212,18 +212,6 @@ class LogSecurityAgent {
                     const fallbackScore = this.calculateFallbackScore(threatResult);
                     if (fallbackScore >= this.config.thresholds.alert_threshold) {
                         this.logger.warn('Using fallback scoring due to LLM failure');
-
-                        try {
-                            await this.pushOverNotification.sendThreatAlert(logEntry, {
-                                ...threatResult,
-                                finalScore: fallbackScore,
-                                finalDecision: 'THREAT_FALLBACK',
-                                decisionMaker: 'FALLBACK'
-                            });
-                        } catch (notificationError) {
-                            this.logger.error('Failed to send threat alert:', notificationError);
-                        }
-
                         try {
                             const { error: fallbackError } = await supabase
                                 .from('logagent')
@@ -297,18 +285,9 @@ class LogSecurityAgent {
                 this.logger.error('LLM connection failed:', llmTest.message);
                 throw new Error(`LLM connection failed: ${llmTest.message}`);
             }
-
             await this.logParser.start();
-            await this.pushOverNotification.start();
 
             this.logger.info('Agent started successfully with LLM decision making');
-
-            // Send startup notification
-            try {
-                await this.pushOverNotification.sendMessage('🟢 LLM-Powered Log Security Agent started');
-            } catch (notificationError) {
-                this.logger.warn('Failed to send startup notification:', notificationError);
-            }
 
         } catch (error) {
             this.logger.error('Failed to start agent:', error);
@@ -344,13 +323,6 @@ class LogSecurityAgent {
             } else {
                 this.logger.info('All queued threats processed successfully');
             }
-
-            try {
-                await this.pushOverNotification.sendMessage('🔴 Log Security Agent stopped');
-            } catch (notificationError) {
-                this.logger.warn('Failed to send shutdown notification:', notificationError);
-            }
-
             this.logger.info('Agent shutdown complete');
         } catch (error) {
             this.logger.error('Error during shutdown:', error);

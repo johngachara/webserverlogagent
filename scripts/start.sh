@@ -63,12 +63,6 @@ cat > config.yaml << 'EOF'
     block_ip_threshold : 8 # Score required to drop an ip address connection
 
 
-  # LLM Provider settings
-  llm:
-    provider: "groq"  # openai, groq, local
-    model: "openai/gpt4.1"     # gpt-4, mixtral-8x7b-32768
-    max_tokens: 300
-    temperature: 0.1
 
   # System URLs configuration
   # URLs that match these patterns will be skipped during threat detection
@@ -104,12 +98,10 @@ fi
 if [ ! -f ".env" ]; then
 echo "Creating .env file"
 cat > .env << 'EOF'
-OPENAIKEY=
-GROQKEY=
+OPENAIKEY=#Not needed by default
+GROQKEY=#Not needed by default
 VIRUSTOTALKEY=
 ABUSEIPDBKEY=
-PUSHOVERUSERKEY=
-PUSHOVERAPPTOKEN=
 SUPABASE_KEY=
 SUPABASE_URL=
 UPSTASH_REDIS_REST_URL=

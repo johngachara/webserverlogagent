@@ -444,7 +444,6 @@ class LLMAnalyzer {
             impact: 'UNKNOWN',                          // Unknown impact level
             attackType: null,                           // No attack type identified
             fromCache: false,                           // Fresh (failed) analysis
-            reasoningEffort: 'error'                    // Special reasoning effort marker
         };
     }
 
@@ -1168,7 +1167,6 @@ ATTACK_TYPE: [Type or BENIGN]
 TOOLS_USED: [Tools that were called]
 INTELLIGENCE_BOOST: [How tools influenced your decision]
 PATTERN_DETECTED: [Any patterns found]
-REASONING_EFFORT: [Level used]
 
 Do not call any more tools - just analyze and respond.`
         }];
@@ -1473,7 +1471,6 @@ Your confidence score determines blocking (8+ = blocked). Analyze and respond.`;
             toolsUsed: [],                              // List of tools called
             intelligenceBoost: '',                      // External intelligence impact
             patternDetected: '',                        // Behavioral patterns found
-            reasoningEffort: 'medium'                   // Default reasoning level
         };
 
         try {
@@ -1518,7 +1515,6 @@ Your confidence score determines blocking (8+ = blocked). Analyze and respond.`;
                 isMalicious: result.isMalicious,
                 shouldBlock: result.shouldBlock,
                 attackType: result.attackType,
-                reasoningEffort: result.reasoningEffort
             });
 
         } catch (error) {
@@ -1597,13 +1593,13 @@ Your confidence score determines blocking (8+ = blocked). Analyze and respond.`;
         else if (upperLine.startsWith('PATTERN_DETECTED:')) {
             result.patternDetected = line.split(':').slice(1).join(':').trim();
         }
-        // Parse reasoning effort level
-        else if (upperLine.startsWith('REASONING_EFFORT:')) {
-            const effort = line.split(':')[1]?.trim().toLowerCase();
-            if (['low', 'medium', 'high'].includes(effort)) {
-                result.reasoningEffort = effort;
-            }
-        }
+        // Parse reasoning effort level (Only applicable for gpt oss)
+        // else if (upperLine.startsWith('REASONING_EFFORT:')) {
+        //     const effort = line.split(':')[1]?.trim().toLowerCase();
+        //     if (['low', 'medium', 'high'].includes(effort)) {
+        //         result.reasoningEffort = effort;
+        //     }
+        // }
         // Parse system URL indicators
         else if (line.includes('is_system_url: true') || upperLine.includes('SYSTEM URL: YES')) {
             result.is_system_url = true;

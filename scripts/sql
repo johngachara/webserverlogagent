@@ -1,0 +1,41 @@
+# CREATE TABLE
+CREATE TABLE IF NOT EXISTS public.logagent (
+                id uuid NOT NULL DEFAULT gen_random_uuid(),
+                created_at timestamp with time zone NOT NULL DEFAULT now(),
+                ip_address text NULL,
+                method text NULL,
+                query_string text NULL,
+                user_agent text NULL,
+                decision text NULL,
+                confidence text NULL,
+                reasoning text NULL,
+                decision_maker text NULL,
+                url text NULL,
+                status bigint NULL,
+                is_system_url boolean NULL,
+                CONSTRAINT logagent_pkey PRIMARY KEY (id)
+                )
+
+
+# CREATE INDEX
+ CREATE INDEX IF NOT EXISTS logagent_created_at_idx
+                    ON public.logagent
+                    USING btree (created_at DESC)
+
+
+# ENABLE RLS
+ALTER TABLE public.logagent ENABLE ROW LEVEL SECURITY
+
+# ALLOW READ ACCESS TO AUTHENTICATED USERS
+CREATE POLICY "Allow read access to authenticated users"
+ON "public"."logagent"
+FOR SELECT
+TO authenticated
+USING (true);
+
+# ALLOW READ ACCESS FOR ANON KEY
+CREATE POLICY "allow_read_access_anon_key"
+ON "public"."logagent"
+FOR SELECT
+TO anon
+USING (true)
