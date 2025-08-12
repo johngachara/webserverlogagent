@@ -8,7 +8,7 @@ import { storeMonitoringLog } from "./upstash.js";
 /**
  * LLMAnalyzer - Advanced Threat Analysis Using Large Language Models
  *
- * A sophisticated security analysis system that leverages multiple LLM providers
+ * A  security analysis system that leverages multiple LLM providers
  * to intelligently analyze network traffic and identify potential threats.
  *
  * Core Capabilities:
@@ -161,7 +161,7 @@ class LLMAnalyzer {
             'openai': 'gpt-4o',                          // Latest GPT-4 optimized model
             'groq': 'llama3-70b-8192',                   // Llama 3 70B with 8K context
             'anthropic': 'claude-3-sonnet-20240229',     // Claude 3 Sonnet
-            'cerebras': 'gpt-oss-120b'                   // Cerebras 120B model
+            'cerebras': 'llama-3.3-70b'                   // llama 3
         };
 
         return modelMap[this.provider] || 'llama3.3-70b';  // Default fallback
@@ -725,6 +725,14 @@ class LLMAnalyzer {
      * @param {string} prompt - Analysis prompt for the LLM
      * @returns {Promise<string>} Final analysis response from LLM
      */
+    /**
+     * Analyze request using OpenAI-compatible API format with intelligent tool support
+     * Supports multiple tool calling rounds, parallel execution, and loop prevention
+     *
+     * @private
+     * @param {string} prompt - Analysis prompt for the LLM
+     * @returns {Promise<string>} Final analysis response from LLM
+     */
     async analyzeWithOpenAIFormat(prompt) {
         const tools = this.getFunctionTools();
         const messages = [
@@ -738,132 +746,458 @@ class LLMAnalyzer {
             }
         ];
 
+        const maxToolRounds = 3; // Prevent infinite loops
+        let currentRound = 0;
+        const executedTools = new Set(); // Track executed tools to prevent duplicates
+
         try {
-            console.log(`Making ${this.provider} API call with tool support enabled`);
+            console.log(`Making ${this.provider} API call with advanced tool support enabled`);
 
             // Initial completion request with tools available
-            const completion = await this.client.chat.completions.create({
+            let completion = await this.client.chat.completions.create({
                 model: this.getModelName(),
                 messages: messages,
-                temperature: 0.1,                       // Low temperature for consistent security analysis
-                max_tokens: 800,                        // Sufficient tokens for detailed analysis
-                stream: false,                          // Synchronous response
-                tools: tools,                           // Available function tools
-                tool_choice: "auto"                     // Let LLM decide when to use tools
+                temperature: 0.1,
+                max_tokens: 800,
+                stream: false,
+                tools: tools,
+                tool_choice: "auto",
             });
 
-            // Validate API response structure
             if (!completion.choices || completion.choices.length === 0) {
+                console.error('API Response:', JSON.stringify(completion, null, 2));
                 throw new Error('No response choices returned from LLM API');
             }
 
-            const responseMessage = completion.choices[0].message;
-
+            let responseMessage = completion.choices[0].message;
             if (!responseMessage) {
                 throw new Error('Empty response message from LLM API');
             }
 
-            const toolCalls = responseMessage.tool_calls;
+            // Tool calling loop with intelligent termination
+            while (responseMessage.tool_calls && responseMessage.tool_calls.length > 0 && currentRound < maxToolRounds) {
+                currentRound++;
+                console.log(`=== Tool Calling Round ${currentRound}/${maxToolRounds} ===`);
 
-            // Handle tool calls if LLM requested external data
-            if (toolCalls && toolCalls.length > 0) {
-                console.log(`Processing ${toolCalls.length} tool call(s) sequentially`);
+                const toolCalls = responseMessage.tool_calls;
+                console.log(`Processing ${toolCalls.length} tool call(s) in round ${currentRound}`);
 
                 // Add the assistant's response with tool calls to message history
                 messages.push(responseMessage);
 
-                // Execute tool calls sequentially to avoid race conditions
-                // Sequential execution ensures proper order and prevents conflicts
-                for (const toolCall of toolCalls) {
-                    const functionName = toolCall.function.name;
+                // Determine execution strategy based on provider and tool types
+                const executionStrategy = this.determineExecutionStrategy(toolCalls, this.provider);
+                console.log(`Using execution strategy: ${executionStrategy}`);
 
-                    try {
-                        console.log(`Executing tool: ${functionName}`);
-
-                        // Parse function arguments from LLM
-                        const functionArgs = JSON.parse(toolCall.function.arguments);
-
-                        // Execute the requested function
-                        const functionResponse = await this.executeFunctionCall(functionName, functionArgs);
-
-                        // Format tool response for LLM
-                        const toolResponse = {
-                            tool_call_id: toolCall.id,
-                            role: "tool",
-                            name: functionName,
-                            content: typeof functionResponse === 'string'
-                                ? functionResponse
-                                : JSON.stringify(functionResponse, null, 2)
-                        };
-
-                        // Add tool response to message history
-                        messages.push(toolResponse);
-
-                    } catch (error) {
-                        console.error(`Tool execution error for ${functionName}:`, error.message);
-
-                        // Add error response to maintain conversation flow
-                        const errorResponse = {
-                            tool_call_id: toolCall.id,
-                            role: "tool",
-                            name: functionName,
-                            content: `Error executing ${functionName}: ${error.message}`
-                        };
-
-                        messages.push(errorResponse);
-                    }
+                if (executionStrategy === 'parallel') {
+                    await this.executeToolCallsParallel(toolCalls, messages, executedTools);
+                } else {
+                    await this.executeToolCallsSequential(toolCalls, messages, executedTools);
                 }
 
-                // Get final analysis incorporating all tool results
-                console.log(`Getting final analysis incorporating tool results`);
+                // Request next completion with updated context
+                console.log(`Requesting completion after tool round ${currentRound}`);
 
-                const finalCompletion = await this.client.chat.completions.create({
+                const nextCompletionConfig = {
                     model: this.getModelName(),
                     messages: messages,
                     temperature: 0.1,
-                    max_tokens: 600                     // Focused tokens for final analysis
-                });
+                    max_tokens: 600,
+                    tools: tools,
+                    tool_choice: "auto",
+                };
 
-                // Enhanced validation for final response
-                if (!finalCompletion || !finalCompletion.choices) {
-                    console.error('Final completion missing choices array');
-                    throw new Error('Final completion response missing choices');
+                // Cerebras-specific adjustments for better tool handling
+                if (this.provider === 'cerebras') {
+                    // Add explicit guidance for Cerebras
+                    messages.push({
+                        role: "user",
+                        content: `Round ${currentRound} complete. If you have all needed information, provide your final assessment in the required format. If you need more tools, call them now.`
+                    });
+
+                    // Slightly reduce max tokens to encourage completion
+                    nextCompletionConfig.max_tokens = 500;
                 }
 
-                if (finalCompletion.choices.length === 0) {
-                    console.error('Final completion returned empty choices array');
-                    throw new Error('Final completion response has no choices');
+                completion = await this.client.chat.completions.create(nextCompletionConfig);
+
+                if (!completion.choices || completion.choices.length === 0) {
+                    throw new Error(`No response choices returned in tool round ${currentRound}`);
                 }
 
-                const finalMessage = finalCompletion.choices[0]?.message;
-                if (!finalMessage) {
-                    console.error('Final completion choice missing message');
-                    throw new Error('Final completion response missing message');
+                responseMessage = completion.choices[0].message;
+                if (!responseMessage) {
+                    throw new Error(`Empty response message in tool round ${currentRound}`);
                 }
 
-                if (!finalMessage.content) {
-                    console.error('Final completion message missing content');
-                    throw new Error('Final completion response missing content');
+                // Check for completion indicators
+                if (this.hasAnalysisContent(responseMessage)) {
+                    console.log(`Analysis content detected in round ${currentRound} - completing`);
+                    break;
                 }
 
-                return finalMessage.content;
-
-            } else {
-                // No tool calls needed - return direct analysis
-                if (!responseMessage.content) {
-                    throw new Error('Empty content in LLM response');
+                // Detect potential loops
+                if (this.detectToolLoop(responseMessage.tool_calls, executedTools)) {
+                    console.warn(`Tool loop detected in round ${currentRound} - forcing completion`);
+                    return this.forceCompletionWithContext(messages, executedTools);
                 }
-
-                console.log('Direct analysis completed without tool calls');
-                return responseMessage.content;
             }
+
+            // Handle final response
+            if (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
+                // Hit max rounds with pending tool calls
+                console.warn(`Maximum tool rounds (${maxToolRounds}) reached with pending tool calls`);
+                return this.forceCompletionWithContext(messages, executedTools);
+            }
+
+            // Final analysis content
+            if (!responseMessage.content || responseMessage.content.trim() === '') {
+                console.warn('Empty content in final response after tool execution');
+                return this.forceCompletionWithContext(messages, executedTools);
+            }
+
+            console.log(`Analysis completed successfully after ${currentRound} tool rounds`);
+            return responseMessage.content;
 
         } catch (error) {
             console.error(`Error in ${this.provider} API call:`, error.message);
+            console.error('Error stack:', error.stack);
+
+            if (error.message.includes('tool')) {
+                console.error('Tool-related error occurred');
+                console.error('Messages sent to API:', JSON.stringify(messages.slice(-3), null, 2)); // Last 3 messages for context
+            }
+
             throw new Error(`${this.provider} API error: ${error.message}`);
         }
     }
 
+    /**
+     * Determine optimal execution strategy for tool calls
+     *
+     * @private
+     * @param {Array} toolCalls - Array of tool calls to execute
+     * @param {string} provider - LLM provider name
+     * @returns {string} 'parallel' or 'sequential'
+     */
+    determineExecutionStrategy(toolCalls, provider) {
+        // Always use sequential for single tool calls
+        if (toolCalls.length === 1) {
+            return 'sequential';
+        }
+
+        // Check if tools are independent (can run in parallel)
+        const toolTypes = toolCalls.map(call => call.function.name);
+        const hasStorageTools = toolTypes.includes('storeMonitoringLog');
+        const hasIPChecks = toolTypes.includes('checkAbuseIPDB') || toolTypes.includes('checkVirusTotal');
+
+        // If mixing storage with IP checks, use sequential to ensure data consistency
+        if (hasStorageTools && hasIPChecks) {
+            console.log('Mixed tool types detected - using sequential execution for data consistency');
+            return 'sequential';
+        }
+
+        // Multiple IP reputation checks can run in parallel
+        if (toolTypes.every(tool => ['checkAbuseIPDB', 'checkVirusTotal'].includes(tool))) {
+            console.log('Multiple IP reputation checks - using parallel execution');
+            return 'parallel';
+        }
+
+        // Provider-specific preferences
+        if (provider === 'cerebras') {
+            // Cerebras seems to handle sequential better
+            return 'sequential';
+        }
+
+        // Default to parallel for independent operations
+        return 'parallel';
+    }
+
+    /**
+     * Execute tool calls in parallel
+     *
+     * @private
+     * @param {Array} toolCalls - Tool calls to execute
+     * @param {Array} messages - Message history
+     * @param {Set} executedTools - Set of executed tool signatures
+     */
+    async executeToolCallsParallel(toolCalls, messages, executedTools) {
+        console.log(`Executing ${toolCalls.length} tools in parallel`);
+
+        // Create promises for all tool executions
+        const toolPromises = toolCalls.map(async (toolCall) => {
+            const functionName = this.normalizeToolName(toolCall.function.name);
+            const toolSignature = `${functionName}:${toolCall.function.arguments}`;
+
+            try {
+                console.log(`[Parallel] Executing: ${functionName}`);
+
+                // Skip if already executed (prevent duplicates)
+                if (executedTools.has(toolSignature)) {
+                    console.log(`[Parallel] Skipping duplicate tool: ${functionName}`);
+                    return {
+                        toolCall,
+                        result: 'Tool already executed in previous round',
+                        skipped: true
+                    };
+                }
+
+                executedTools.add(toolSignature);
+
+                // Parse function arguments
+                const functionArgs = JSON.parse(toolCall.function.arguments);
+
+                // Execute the function
+                const functionResponse = await this.executeFunctionCall(functionName, functionArgs);
+
+                return {
+                    toolCall,
+                    result: functionResponse,
+                    skipped: false
+                };
+
+            } catch (error) {
+                console.error(`[Parallel] Error executing ${functionName}:`, error.message);
+                return {
+                    toolCall,
+                    error: error.message,
+                    skipped: false
+                };
+            }
+        });
+
+        // Wait for all tools to complete
+        const results = await Promise.all(toolPromises);
+
+        // Add all results to message history
+        results.forEach(({ toolCall, result, error, skipped }) => {
+            const toolResponse = {
+                tool_call_id: toolCall.id,
+                role: "tool",
+                name: this.normalizeToolName(toolCall.function.name),
+                content: error
+                    ? `Error: ${error}`
+                    : (skipped
+                        ? result
+                        : (typeof result === 'string' ? result : JSON.stringify(result, null, 2)))
+            };
+
+            messages.push(toolResponse);
+        });
+
+        console.log(`Parallel execution completed - ${results.length} tools processed`);
+    }
+
+    /**
+     * Execute tool calls sequentially
+     *
+     * @private
+     * @param {Array} toolCalls - Tool calls to execute
+     * @param {Array} messages - Message history
+     * @param {Set} executedTools - Set of executed tool signatures
+     */
+    async executeToolCallsSequential(toolCalls, messages, executedTools) {
+        console.log(`Executing ${toolCalls.length} tools sequentially`);
+
+        for (const toolCall of toolCalls) {
+            const functionName = this.normalizeToolName(toolCall.function.name);
+            const toolSignature = `${functionName}:${toolCall.function.arguments}`;
+
+            try {
+                console.log(`[Sequential] Executing: ${functionName}`);
+
+                // Skip if already executed
+                if (executedTools.has(toolSignature)) {
+                    console.log(`[Sequential] Skipping duplicate tool: ${functionName}`);
+
+                    const skipResponse = {
+                        tool_call_id: toolCall.id,
+                        role: "tool",
+                        name: functionName,
+                        content: 'Tool already executed in previous round'
+                    };
+                    messages.push(skipResponse);
+                    continue;
+                }
+
+                executedTools.add(toolSignature);
+
+                // Parse function arguments
+                const functionArgs = JSON.parse(toolCall.function.arguments);
+
+                // Execute the function
+                const functionResponse = await this.executeFunctionCall(functionName, functionArgs);
+
+                // Format tool response
+                const toolResponse = {
+                    tool_call_id: toolCall.id,
+                    role: "tool",
+                    name: functionName,
+                    content: typeof functionResponse === 'string'
+                        ? functionResponse
+                        : JSON.stringify(functionResponse, null, 2)
+                };
+
+                messages.push(toolResponse);
+
+            } catch (error) {
+                console.error(`[Sequential] Error executing ${functionName}:`, error.message);
+
+                const errorResponse = {
+                    tool_call_id: toolCall.id,
+                    role: "tool",
+                    name: functionName,
+                    content: `Error executing ${functionName}: ${error.message}`
+                };
+
+                messages.push(errorResponse);
+            }
+        }
+
+        console.log(`Sequential execution completed`);
+    }
+
+    /**
+     * Normalize tool names to handle provider-specific variations
+     *
+     * @private
+     * @param {string} toolName - Original tool name from LLM
+     * @returns {string} Normalized tool name
+     */
+    normalizeToolName(toolName) {
+        // Handle Cerebras adding "functions." prefix
+        if (toolName.startsWith('functions.')) {
+            return toolName.replace('functions.', '');
+        }
+
+        // Handle other potential prefixes
+        if (toolName.includes('.')) {
+            const parts = toolName.split('.');
+            return parts[parts.length - 1]; // Get the last part
+        }
+
+        return toolName;
+    }
+
+    /**
+     * Check if response message contains analysis content
+     *
+     * @private
+     * @param {Object} message - Response message to check
+     * @returns {boolean} Whether message contains analysis content
+     */
+    hasAnalysisContent(message) {
+        if (!message.content) return false;
+
+        const content = message.content.toUpperCase();
+
+        // Look for analysis format indicators
+        const indicators = [
+            'MALICIOUS:',
+            'CONFIDENCE:',
+            'EXPLANATION:',
+            'ATTACK_TYPE:'
+        ];
+
+        // Must have at least 2 indicators to be considered analysis
+        const foundIndicators = indicators.filter(indicator => content.includes(indicator));
+        return foundIndicators.length >= 2;
+    }
+
+    /**
+     * Detect potential tool calling loops
+     *
+     * @private
+     * @param {Array} newToolCalls - New tool calls being requested
+     * @param {Set} executedTools - Previously executed tool signatures
+     * @returns {boolean} Whether a loop is detected
+     */
+    detectToolLoop(newToolCalls, executedTools) {
+        if (!newToolCalls || newToolCalls.length === 0) return false;
+
+        // Check if all requested tools have already been executed
+        const allAlreadyExecuted = newToolCalls.every(toolCall => {
+            const functionName = this.normalizeToolName(toolCall.function.name);
+            const toolSignature = `${functionName}:${toolCall.function.arguments}`;
+            return executedTools.has(toolSignature);
+        });
+
+        if (allAlreadyExecuted) {
+            console.warn('Tool loop detected: All requested tools already executed');
+            return true;
+        }
+
+        // Check for repetitive patterns (same tool called multiple times with same args)
+        const currentTools = newToolCalls.map(call => ({
+            name: this.normalizeToolName(call.function.name),
+            args: call.function.arguments
+        }));
+
+        const duplicates = currentTools.filter((tool, index) =>
+            currentTools.findIndex(t => t.name === tool.name && t.args === tool.args) !== index
+        );
+
+        if (duplicates.length > 0) {
+            console.warn('Tool loop detected: Duplicate tools in same request');
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Force completion with available context when tools fail to conclude
+     *
+     * @private
+     * @param {Array} messages - Complete message history
+     * @param {Set} executedTools - Set of executed tools
+     * @returns {Promise<string>} Forced completion analysis
+     */
+    async forceCompletionWithContext(messages, executedTools) {
+        console.log('Forcing completion with available context');
+
+        // Add explicit instruction for final analysis
+        const forceMessages = [...messages, {
+            role: "user",
+            content: `Please provide your final security assessment now based on all the tool results above. Use the required format:
+
+MALICIOUS: [YES/NO/UNCERTAIN]
+CONFIDENCE: [1-10]
+EXPLANATION: [Your reasoning]
+ATTACK_TYPE: [Type or BENIGN]
+TOOLS_USED: [Tools that were called]
+INTELLIGENCE_BOOST: [How tools influenced your decision]
+PATTERN_DETECTED: [Any patterns found]
+REASONING_EFFORT: [Level used]
+
+Do not call any more tools - just analyze and respond.`
+        }];
+
+        try {
+            // Force completion without tools
+            const forcedCompletion = await this.client.chat.completions.create({
+                model: this.getModelName(),
+                messages: forceMessages,
+                temperature: 0.1,
+                max_tokens: 500,
+                // Explicitly disable tools to force text response
+                tool_choice: "none"
+            });
+
+            if (!forcedCompletion.choices?.[0]?.message?.content) {
+                // Ultimate fallback - create analysis from available data
+                console.warn('Forced completion also failed - creating manual fallback');
+                return this.createManualFallback(messages, executedTools);
+            }
+
+            console.log('Forced completion successful');
+            return forcedCompletion.choices[0].message.content;
+
+        } catch (error) {
+            console.error('Forced completion failed:', error.message);
+            return `Unable to force tools completions`
+        }
+    }
     /**
      * Analyze request using Anthropic's Claude API
      *
@@ -928,6 +1262,12 @@ class LLMAnalyzer {
      * @private
      * @returns {string} Complete system prompt for security analysis
      */
+    /**
+     * Get the enhanced system prompt for multi-round tool calling
+     *
+     * @private
+     * @returns {string} Enhanced system prompt
+     */
     getSystemPrompt() {
         return `You are a cybersecurity expert with final authority over threat decisions. Your primary responsibility is to analyze requests and assign confidence scores that determine security actions.
 
@@ -936,118 +1276,131 @@ Your **confidence score (1-10) is the decision mechanism**:
 - Confidence 8+ = Automatic block
 - Confidence 1-7 = Allowed (with appropriate monitoring)
 
-## Reasoning Effort Guidelines
-**Default reasoning effort: Medium** - Provides balanced analysis for most security assessments.
+## CRITICAL: Tool Usage Efficiency Guidelines
 
-## Assessment Framework
+**DO NOT use tools for obviously benign or obviously malicious requests.**
 
-### Threat Categories & Confidence Ranges
+### Obviously Benign (Confidence 1-3) - NO TOOLS NEEDED:
+- Standard user requests to normal endpoints
+- Common legitimate paths (/favicon.ico, /robots.txt, /sitemap.xml)
+- Regular API calls with proper parameters
+- Normal file extensions (.jpg, .css, .js from CDNs) 
+and other similar requests
+### Obviously Malicious (Confidence 8-10) - NO TOOLS NEEDED:
+- Clear SQL injection patterns (' OR 1=1--, UNION SELECT)
+- XSS payloads ( javascript:, onload=)
+- Command injection (; rm -rf, | whoami, && curl)
+- Directory traversal (../../../etc/passwd)
+- Null bytes, format strings, buffer overflow attempts
+and other similar attacks
+### Tool Usage Zone (Confidence 4-7 ONLY):
+**Only use tools when genuinely uncertain and external intelligence could change your assessment.**
 
-**Definitive Threats (8-10)**
-- Clear attack signatures: SQL injection, XSS, command injection etc (Basically OWASP TOP 10 and other common threats)
-- Well-known exploit patterns
-- Directory traversal attempts
-- Malformed requests with obvious malicious intent
+## Multi-Round Tool Strategy (Use Sparingly)
 
-**Suspicious Activity (4-7)**  
-- Port scanning behavior
-- Reconnaissance attempts
-- Unusual parameter combinations
-- Borderline malicious patterns
-- Error-inducing requests
+**Pre-Tool Decision Check:**
+Before calling ANY tool, ask yourself:
+1. "Is this request obviously benign or malicious based on content alone?"
+2. "Would external IP intelligence actually change my confidence score?"
+3. "Is this IP suspicious enough to warrant rate-limited API calls?"
 
-**Ambiguous Patterns (3-6)**
-- Repeated requests with unclear intent
-- Unusual timing or frequency
-- Edge cases requiring pattern analysis
-- Behavioral anomalies
+**Round 1: Targeted Intelligence (Only if genuinely needed)**
+- checkAbuseIPDB(ip) - ONLY for suspicious external IPs
+- checkVirusTotal(ip) - ONLY for borderline cases where reputation matters
+- Skip tools entirely if request content gives clear verdict
 
-**Baseline Activity (1-3)**
-- Normal user requests
-- Standard legitimate traffic
-- Expected application behavior
+**Round 2: Pattern Monitoring (Enforce for uncertain cases)**
+- storeMonitoringLog(entry, confidence, explanation) - MANDATORY for confidence 4-7
+- This builds historical context for repeat offenders
+- Use this aggressively to build intelligence over time
 
-## Tool Selection Strategy
+**Final Round: Decision**
+- Provide assessment in required format
+- No more tool calls after starting final analysis
 
-Your available tools serve different analytical purposes:
+## Enhanced Decision Logic
 
-**IP Intelligence Tools**
--   checkAbuseIPDB(ip)   - Historical abuse data
--   checkVirusTotal(ip)   - Multi-engine analysis
-*Best for: Borderline cases where IP reputation can influence confidence*
+### Immediate Assessment (No Tools Required):
 
-**Pattern Analysis & Monitoring**  
--   storeMonitoringLog(entry, confidence, explanation)   - Stores requests for pattern analysis and automatically checks for recurring activity from the same IP
-*Best for: Ambiguous cases and building comprehensive threat intelligence over time,Consider it as your **monitoring brain** incase requests need monitoring you use this.*
+**Confidence 1-2: Obviously Legitimate**
+- Standard web traffic patterns
+- Legitimate API usage
 
-## Enhanced Pattern Detection Strategy
+**Confidence 8-10: Obviously Malicious**
+- Attack signatures in URL/payload
+- Known exploit patterns
+- Malformed requests with clear malicious intent
 
-**For Ambiguous Requests (neither obviously malicious nor obviously benign):**
+**Confidence 3-7: Requires Analysis**
+- External IPs with suspicious patterns
+- Reconnaissance attempts (/.well-known/, /admin, /.env)
+- Unusual request frequencies or patterns
+- Automated tool signatures
+- **THESE cases should use monitoring and potentially external tools**
 
-The   storeMonitoringLog   function now provides automatic pattern detection capabilities:
-- **Always store ambiguous requests** to build behavioral profiles
-- **Automatic recurrence checking** - the function detects if the same IP has made similar requests before
-- **Progressive attack detection** - should help to identify slow, distributed attack patterns that might be missed in single-request analysis
-- **Temporal correlation** - reveals attack campaigns that unfold over time
+### Tool Decision Matrix:
 
-**Use storeMonitoringLog when:**
-- Request falls in the 3-7 confidence range (suspicious but not definitive)
-- Behavioral patterns are unclear from single request analysis
-- You need to track potential reconnaissance or probing activities
-- Building evidence for progressive or slow attacks
-- Creating baseline patterns for legitimate vs. suspicious behavior
+{
+ "obviously_malicious_payload": {
+   "any_ip": "no_tools_needed"
+ },
+ "suspicious_pattern": {
+   "any_ip": "consider_abuseipdb"
+ },
+ "borderline_case": {
+   "any_ip": "consider_both_apis"
+ },
+ "uncertain_pattern": {
+   "any_ip": "must_use_monitoring"
+ }
+};
 
-The function automatically returns information about other occurrences from the same IP, helping you:
-- Escalate confidence if patterns emerge
-- Identify coordinated attack campaigns
-- Distinguish between isolated incidents and systematic probing
-- Build comprehensive threat intelligence profiles
+## Response Format Requirements
 
-## Decision Logic
+**Final Analysis Must Include:**
 
-Consider these factors when determining confidence:
+       MALICIOUS: [YES/NO/UNCERTAIN]
+       CONFIDENCE: [1-10]
+       EXPLANATION: [Your reasoning in 2-3 clear sentences, including why tools were/weren't used]
+       ATTACK_TYPE: [Specific threat type or BENIGN]
+       TOOLS_USED: [Functions called during analysis or "NONE - obvious case"]
+       INTELLIGENCE_BOOST: [How external data influenced confidence or "N/A - content-based decision"]
+       PATTERN_DETECTED: [Relevant behavioral patterns identified]
 
-1. **Request Analysis**: Examine the actual content for threat indicators
-2. **Context Evaluation**: Consider the IP, timing, and behavioral patterns  
-3. **Automatic Pattern Recognition**: The monitoring system now provides historical context automatically
-4. **Progressive Threat Detection**: Look for slow attacks, reconnaissance, or gradual escalation patterns
-5. **Risk Assessment**: Balance false positives vs. security exposure
+## Rate Limit Conservation Rules
 
-## Tool Usage Principles
+**Never call external APIs for:**
+- Localhost/internal IP addresses (127.x.x.x, 10.x.x.x, 192.168.x.x, 172.16-31.x.x)
+- Requests where content alone provides clear verdict (confidence 1-3 or 8-10)
+- Obviously legitimate requests
 
-- Use IP intelligence when reputation data could clarify borderline cases
-- **Always use monitoring for ambiguous cases** - the system now automatically provides pattern context
-- Store requests that aren't clearly benign or malicious to build comprehensive threat profiles
-- Let the monitoring system reveal attack patterns that span multiple requests over time
-- Skip tools only for obvious cases where additional data won't change the outcome
+**Always use monitoring for:**
+- Confidence scores 4-7 (uncertain cases)
+- First-time suspicious patterns
+- Potential reconnaissance attempts
+- Repeated unusual behavior
 
-## Response Format
+**Prioritize external APIs for:**
+- External IPs showing sophisticated attack patterns
+- Cases where IP reputation could significantly impact confidence
+- Borderline cases where additional intelligence is truly valuable
 
-Provide your assessment in this structure:
+## Key Efficiency Guidelines
 
-      
-MALICIOUS: [YES/NO/UNCERTAIN]
-CONFIDENCE: [1-10]
-EXPLANATION: [Your reasoning in 2-3 clear sentences]
-ATTACK_TYPE: [Specific threat type or BENIGN]
-TOOLS_USED: [Functions called during analysis]
-INTELLIGENCE_BOOST: [How external data influenced your confidence]
-PATTERN_DETECTED: [Relevant behavioral patterns identified, including recurring IP activity]
-REASONING_EFFORT: [Reasoning Effort Applied for the request]
-      
+1. **Content-First Analysis**: Analyze request content before considering tools
+2. **IP Context Awareness**: Understand IP ranges that don't need external lookups
+3. **Confidence Thresholds**: Only use tools when genuinely in the 4-7 uncertainty range
+4. **Monitoring Enforcement**: Use monitoring aggressively to build pattern intelligence
+5. **Rate Limit Respect**: Treat external APIs as precious resources
 
-## Key Guidelines
+## Intelligence Integration Strategy
 
-- **Accuracy over speed**: Your confidence score directly controls blocking
-- **Context matters**: Consider the full picture, not just isolated indicators
-- **Pattern awareness**: The monitoring system now automatically provides historical context for better decision-making
-- **Progressive threat detection**: Use the automatic recurrence checking to identify slow attacks and reconnaissance patterns
-- **Store ambiguous cases**: When in doubt, store the request - the system will help reveal patterns over time
-- **Justified decisions**: Ensure your confidence level matches your evidence
-- **Adaptive analysis**: Match reasoning effort to complexity
+- **Build Local Intelligence**: Use monitoring to create historical context
+- **Selective External Queries**: Only when IP reputation matters for decision
+- **Pattern Recognition**: Let monitoring data guide future assessments
+- **Confidence Calibration**: Use tools to refine edge cases, not obvious ones
 
-
-Remember: You're building an intelligent defense system that learns from patterns while making precise real-time decisions. The  monitoring capabilities  automatically provide historical context, making it easier to detect sophisticated attacks that unfold over time. Focus on accurate confidence scoring supported by both immediate analysis and automatic pattern intelligence.`;
+Remember: Your goal is accurate threat detection with minimal external API usage. Build intelligence through monitoring, make content-based decisions when possible, and reserve external tools for genuinely uncertain cases where IP reputation matters.`;
     }
 
     /**

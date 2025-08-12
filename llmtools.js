@@ -45,7 +45,7 @@ export async function checkVirusTotal(ip) {
 
     if (!virusTotalKey) {
         console.warn('VirusTotal API key not found in environment variables');
-        return 'VirusTotal API key not configured';
+        return 'VirusTotal API key is not configured. Unable to perform IP reputation check.';
     }
 
     try {
@@ -67,6 +67,7 @@ export async function checkVirusTotal(ip) {
             const stats = attributes.last_analysis_stats || {};
             const maliciousCount = stats.malicious || 0;
             const suspiciousCount = stats.suspicious || 0;
+            const totalEngines = Object.keys(attributes.last_analysis_results || {}).length;
 
             // Get detailed results for malicious engines
             const results = attributes.last_analysis_results || {};
@@ -74,50 +75,91 @@ export async function checkVirusTotal(ip) {
 
             Object.entries(results).forEach(([engine, result]) => {
                 if (result.category === 'malicious') {
-                    maliciousEngines.push({
-                        engine: engine,
-                        result: result.result || 'malicious'
-                    });
+                    maliciousEngines.push(`${engine}: ${result.result || 'malicious'}`);
                 }
             });
 
-            const vtResult = {
-                isMalicious: maliciousCount > 0 || suspiciousCount > 0,
-                maliciousCount: maliciousCount,
-                suspiciousCount: suspiciousCount,
-                totalEngines: Object.keys(results).length,
-                maliciousEngines: maliciousEngines.map(entry => entry),
-                asn: attributes.asn,
-                country: attributes.country,
-                network: attributes.network,
-                reputation: attributes.reputation || 0,
-                lastAnalysisDate: attributes.last_analysis_date ? new Date(attributes.last_analysis_date * 1000) : null
-            };
+            // Build comprehensive string report
+            let report = `VirusTotal IP Analysis for ${ip}:\n`;
 
-            console.log(`VirusTotal result for ${ip}:`, vtResult);
-            return vtResult;
+            // Threat assessment
+            if (maliciousCount > 0 || suspiciousCount > 0) {
+                report += `⚠️ THREAT DETECTED: This IP is flagged as potentially malicious.\n`;
+                report += `- ${maliciousCount} security engines flagged it as malicious\n`;
+                if (suspiciousCount > 0) {
+                    report += `- ${suspiciousCount} security engines flagged it as suspicious\n`;
+                }
+                report += `- Total engines that analyzed: ${totalEngines}\n`;
+
+                if (maliciousEngines.length > 0) {
+                    report += `\nMalicious detections:\n`;
+                    maliciousEngines.slice(0, 5).forEach(engine => {
+                        report += `  • ${engine}\n`;
+                    });
+                    if (maliciousEngines.length > 5) {
+                        report += `  • ... and ${maliciousEngines.length - 5} more engines\n`;
+                    }
+                }
+            } else {
+                report += `✅ CLEAN: No security engines flagged this IP as malicious (${totalEngines} engines checked).\n`;
+            }
+
+            // Network information
+            if (attributes.asn || attributes.country || attributes.network) {
+                report += `\nNetwork Information:\n`;
+                if (attributes.country) {
+                    report += `- Country: ${attributes.country}\n`;
+                }
+                if (attributes.asn) {
+                    report += `- ASN: ${attributes.asn}\n`;
+                }
+                if (attributes.network) {
+                    report += `- Network: ${attributes.network}\n`;
+                }
+            }
+
+            // Reputation score
+            if (attributes.reputation !== undefined) {
+                const reputation = attributes.reputation;
+                report += `- Reputation Score: ${reputation}`;
+                if (reputation < 0) {
+                    report += ` (negative - indicates bad reputation)`;
+                } else if (reputation > 0) {
+                    report += ` (positive - indicates good reputation)`;
+                } else {
+                    report += ` (neutral)`;
+                }
+                report += `\n`;
+            }
+
+            // Last analysis date
+            if (attributes.last_analysis_date) {
+                const lastAnalysis = new Date(attributes.last_analysis_date * 1000);
+                report += `- Last analyzed: ${lastAnalysis.toISOString().split('T')[0]} (${lastAnalysis.toLocaleString()})\n`;
+            }
+
+            console.log(`VirusTotal analysis completed for ${ip}`);
+            console.log(`report for ${ip}`, report.trim());
+            return report.trim();
         }
 
         console.log(`No attributes found for ${ip} in VirusTotal`);
-        return { isMalicious: false, error: 'No data available' };
+        return `VirusTotal check for IP ${ip}: No analysis data available. This IP may not have been previously analyzed by VirusTotal or may be a private/internal IP address.`;
 
     } catch (error) {
         // Handle rate limiting (429) and other errors gracefully
         if (error.response?.status === 429) {
             console.warn('VirusTotal API rate limit exceeded');
-            return {
-                isMalicious: false,
-                error: 'Rate limited',
-                rateLimited: true
-            };
+            return `VirusTotal API rate limit exceeded. Cannot check IP ${ip} at this time. The free tier allows 4 requests per minute. Please try again later.`;
         }
 
         if (error.response?.status === 404) {
             console.log(`IP ${ip} not found in VirusTotal database`);
-            return {
-                isMalicious: false,
-                error: 'IP not found in database'
-            };
+            return `IP ${ip} was not found in the VirusTotal database. This could mean the IP has never been analyzed or is not publicly routable.`;
+        }
+
+        if (error.response?.status === 403) {
+            return `VirusTotal API access forbidden. Please check that your API key is valid and has the necessary permissions.`;
         }
 
         console.error('VirusTotal check failed:', {
@@ -126,11 +168,7 @@ export async function checkVirusTotal(ip) {
             statusText: error.response?.statusText
         });
 
-        return {
-            isMalicious: false,
-            error: `Request failed: ${error.message}`,
-            status: error.response?.status
-        };
+        return `VirusTotal check failed for IP ${ip}. Error: ${error.message}${error.response?.status ? ` (HTTP ${error.response.status})` : ''}. Unable to determine threat status.`;
     }
 }
 
