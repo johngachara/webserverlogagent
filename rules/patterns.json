@@ -408,20 +408,10 @@
   },
   "wordpress_specific": {
     "patterns": [
-      "(/wp-content/|/wp-includes/|/wp-admin/)",
-      "(/wp-login\\.php|/wp-config\\.php)",
-      "(/wp-json/|/xmlrpc\\.php)",
-      "(/revslider/|/revolution/)",
-      "(/plugins/|/themes/|/uploads/)",
-      "(wp_user|wp_posts|wp_options)",
-      "(/wp-content/uploads/.*\\.php)",
-      "(/wp-admin/admin-ajax\\.php)",
-      "(/wp-cron\\.php|/wp-trackback\\.php)",
-      "(/wp-comments-post\\.php)",
+      "(/wp-config\\.php)",
+      "(/wp-content/uploads/.*\\.php$)",
       "(/wp-content/debug\\.log)",
-      "(/?author=1|/?author=\\d+)",
-      "(/\\?rest_route=)",
-      "(/wp-json/wp/v2/users)"
+      "(wp_user|wp_posts|wp_options).*['\"`<>=]"
     ],
     "score": 4,
     "description": "WordPress-specific attack patterns"
