@@ -1,5 +1,6 @@
 import {Redis} from "@upstash/redis";
-
+import * as dotenv from "dotenv";
+dotenv.config()
 /**
  * Upstash Redis client configuration
  * Make sure to set these environment variables:
