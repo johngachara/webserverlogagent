@@ -1,6 +1,5 @@
-FROM node:24-slim
+FROM node:lts-slim
 WORKDIR /logagent
-RUN apt-get update && apt-get upgrade -y && apt-get install -y iptables
 COPY package.json .
 RUN npm install --verbose
 COPY . .

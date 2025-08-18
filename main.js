@@ -5,7 +5,7 @@ import LogParser from './logparser.js';
 import ThreatDetector from './threatdetector.js';
 import LLMAnalyzer from './llmanalyzer.js';
 // import PushoverNotifier from './pushover.js'; stopped using
-import { blockIpAddress } from './llmtools.js';
+import { blockIP } from './blockipazure.js';
 import { createClient } from '@supabase/supabase-js';
 
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -161,7 +161,9 @@ class LogSecurityAgent {
                         // Block IP if LLM confidence is high enough
                         if (confidence >= this.config.thresholds.block_ip_threshold) {
                             try {
-                                blockIpAddress(logEntry.ip);
+                                // Testing
+                                this.logger.warn('IP block test')
+                                //await blockIP(logEntry.ip);
                                 this.logger.warn('IP blocked based on LLM decision', {
                                     ip: logEntry.ip,
                                     confidence: confidence,
