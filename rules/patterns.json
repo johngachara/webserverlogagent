@@ -307,7 +307,7 @@
       "(nikto/\\d+\\.\\d+)",
       "(curl/\\d+\\.\\d+)",
       "(python-requests/\\d+\\.\\d+)",
-      "(scanner|crawl|bot|spider)",
+      "(scanner|crawl|spider)",
       "(nmap|masscan|zmap)",
       "(dirb|dirbuster|gobuster)",
       "(burp|intruder|repeater)",
