@@ -2,131 +2,148 @@ import OpenAI from 'openai';
 import Groq from 'groq-sdk';
 import Anthropic from '@anthropic-ai/sdk';
 import Cerebras from '@cerebras/cerebras_cloud_sdk';
+import TransformersLLM from './transformersLLM.js';
 import { checkAbuseIPDB, checkVirusTotal } from "./llmtools.js";
 import { storeMonitoringLog } from "./upstash.js";
 
 /**
- * LLMAnalyzer - Advanced Threat Analysis Using Large Language Models
+ * LLMAnalyzer - Advanced Two-Tier Threat Analysis System
  *
- * A  security analysis system that leverages multiple LLM providers
- * to intelligently analyze network traffic and identify potential threats.
+ * A sophisticated security analysis system that uses a two-tier approach:
+ * 1. Primary Tier: Fast Transformers.js model (Llama-3.2-1B) for 80% of decisions
+ * 2. Secondary Tier: Advanced cloud models with tool calling for complex cases
  *
- * Core Capabilities:
- * - Multi-provider LLM support (OpenAI, Groq, Cerebras, Anthropic)
- * - Intelligent caching system with IP and request-level storage
- * - External threat intelligence integration via function calling
- * - Automated malicious IP reputation management
- * - Comprehensive request pattern analysis and monitoring
- * - Sequential tool execution to prevent race conditions
- * - Robust error handling without retry logic
+ * Architecture Benefits:
+ * - Fast response times for obvious cases
+ * - Resource efficiency through intelligent routing
+ * - Advanced analysis only when needed
+ * - Comprehensive caching across both tiers
+ * - Seamless fallback mechanisms
  *
- * Architecture:
- * - IP Cache: Fast blocking of known malicious IPs
- * - Request Cache: Detailed analysis results for specific requests
- * - Queue Tracking: Manages pending requests per IP for cleanup
- * - Tool Integration: External APIs for enhanced threat intelligence
+ * Decision Flow:
+ * Request → Primary Model → [BENIGN/MALICIOUS: Return] → [UNCERTAIN: Escalate] → Secondary Model → Final Decision
  *
  * @class LLMAnalyzer
  */
 class LLMAnalyzer {
     /**
-     * Initialize the LLM Analyzer with provider-specific configuration
+     * Initialize the two-tier LLM analyzer system
      *
-     * @param {string} apiKey - API key for the chosen LLM provider
-     * @param {string} provider - LLM provider name ('openai', 'groq', 'cerebras', 'anthropic')
-     * @throws {Error} If API key is missing or provider initialization fails
+     * @param {string} apiKey - API key for the secondary LLM provider
+     * @param {string} provider - Secondary LLM provider ('cerebras', 'openai', 'groq', 'anthropic')
+     * @param {Object} options - Additional configuration options
+     * @param {boolean} options.enablePrimaryModel - Enable primary Transformers model (default: true)
+     * @param {string} options.primaryModelId - Primary model identifier (default: meta-llama/Llama-3.2-1B)
+     * @throws {Error} If API key is missing or initialization fails
      */
-    constructor(apiKey, provider = 'cerebras') {
-        // Validate required API key
+    constructor(apiKey, provider = 'cerebras', options = {}) {
+        console.log('Initializing two-tier LLMAnalyzer system...');
+
+        // Validate required API key for secondary model
         if (!apiKey) {
-            throw new Error('API key is required for LLM initialization');
+            throw new Error('API key is required for secondary LLM initialization');
         }
 
         // Store configuration
         this.apiKey = apiKey;
         this.provider = provider.toLowerCase();
+        this.options = {
+            enablePrimaryModel: true,
+            primaryModelId: 'meta-llama/Llama-3.2-1B',
+            primaryDevice: 'cpu',
+            ...options
+        };
 
-        // Initialize the appropriate LLM client
+        // Initialize secondary (advanced) LLM client
         try {
-            this.client = this.initializeClient();
+            this.secondaryClient = this.initializeSecondaryClient();
+            console.log(`Secondary model initialized: ${this.provider} (${this.getSecondaryModelName()})`);
         } catch (error) {
-            console.error('Failed to initialize LLM client:', error.message);
-            throw new Error(`LLM client initialization failed: ${error.message}`);
+            console.error('Failed to initialize secondary LLM client:', error.message);
+            throw new Error(`Secondary LLM client initialization failed: ${error.message}`);
         }
 
-        // Set up all caching systems
+        // Initialize primary (fast) model if enabled
+        this.primaryModel = null;
+        if (this.options.enablePrimaryModel) {
+            try {
+                this.primaryModel = new TransformersLLM({
+                    modelId: this.options.primaryModelId,
+                    device: this.options.primaryDevice
+                });
+                console.log(`Primary model configured: ${this.options.primaryModelId}`);
+            } catch (error) {
+                console.warn('Primary model initialization failed, continuing with secondary only:', error.message);
+                this.options.enablePrimaryModel = false;
+            }
+        }
+
+        // Set up caching systems
         this.initializeCaches();
 
         // Define system configuration constants
         this.config = {
             // Cache size limits
-            maxIpCacheSize: 500,                    // Maximum IPs to cache
-            maxRequestCacheSize: 1000,              // Maximum individual requests to cache
+            maxIpCacheSize: 500,
+            maxRequestCacheSize: 1000,
 
             // Threat detection thresholds
-            maliciousConfidenceThreshold: 8,        // Confidence level (8+) that triggers automatic blocking
+            maliciousConfidenceThreshold: 8,
+
+            // Two-tier system settings
+            primaryTimeoutMs: 15000,                 // Primary model timeout
+            maxPrimaryRetries: 1,                   // Primary model retry attempts
+            escalationThreshold: 5,                 // Confidence level that triggers escalation
 
             // Maintenance settings
-            cacheCleanupInterval: 3600000,          // Cache cleanup every hour (ms)
+            cacheCleanupInterval: 3600000,
+        };
+
+        // Performance tracking for two-tier system
+        this.tierStats = {
+            totalRequests: 0,
+            primaryResolved: 0,
+            secondaryEscalated: 0,
+            primaryErrors: 0,
+            averagePrimaryTime: 0,
+            averageSecondaryTime: 0,
+            escalationRate: 0
         };
 
         // Start automatic cache maintenance
         this.startCacheMaintenance();
 
-        console.log(`LLMAnalyzer initialized with provider: ${this.provider}, model: ${this.getModelName()}`);
+        console.log('Two-tier LLMAnalyzer initialization complete');
+        console.log(`Primary tier: ${this.options.enablePrimaryModel ? 'ENABLED' : 'DISABLED'}`);
+        console.log(`Secondary tier: ${this.provider} (${this.getSecondaryModelName()})`);
     }
 
     /**
-     * Initialize all cache data structures
-     *
-     * Cache Architecture:
-     * - IP Cache: Stores high-confidence malicious IPs for immediate blocking
-     * - Request Cache: Stores detailed analysis results for specific requests
-     * - Queue Tracking: Manages cleanup of cached data when IPs become malicious
-     * - Metadata: Tracks performance metrics and maintenance schedules
-     *
-     * @private
+     * Initialize all cache data structures (same as before)
      */
     initializeCaches() {
-        // IP-level cache for fast malicious IP blocking
-        // Structure: Map<ipAddress, analysisResult>
-        // Purpose: Immediate blocking of known threats without re-analysis
         this.ipCache = new Map();
-
-        // Request-level tracking for cleanup management
-        // Structure: Map<ipAddress, Set<requestKeys>>
-        // Purpose: Track all cached requests per IP for bulk cleanup when IP becomes malicious
         this.ipRequestQueue = new Map();
-
-        // Detailed request cache for specific request patterns
-        // Structure: Map<requestKey, analysisResult>
-        // Purpose: Cache individual request analysis to avoid duplicate processing
         this.requestCache = new Map();
 
-        // Cache performance and maintenance metadata
         this.cacheMetadata = {
-            lastCleanup: Date.now(),        // Timestamp of last maintenance cycle
-            totalAnalyzed: 0,               // Total requests processed
-            cacheHits: 0,                   // Requests served from cache
-            cacheMisses: 0                  // Requests requiring fresh analysis
+            lastCleanup: Date.now(),
+            totalAnalyzed: 0,
+            cacheHits: 0,
+            cacheMisses: 0
         };
 
-        console.log('Cache systems initialized');
+        console.log('Cache systems initialized for two-tier analysis');
     }
 
     /**
-     * Initialize the appropriate LLM client based on provider selection
-     *
-     * @private
-     * @returns {Object} Configured LLM client instance
-     * @throws {Error} If provider is unsupported or client creation fails
+     * Initialize the secondary (advanced) LLM client
      */
-    initializeClient() {
-        // Define provider-specific client factories
+    initializeSecondaryClient() {
         const providerConfigs = {
             'openai': () => new OpenAI({
                 apiKey: this.apiKey,
-                baseURL: 'https://models.github.ai/inference'    // GitHub Models endpoint
+                baseURL: 'https://models.github.ai/inference'
             }),
             'groq': () => new Groq({
                 apiKey: this.apiKey
@@ -139,105 +156,64 @@ class LLMAnalyzer {
             })
         };
 
-        // Get the appropriate factory function
         const clientFactory = providerConfigs[this.provider];
         if (!clientFactory) {
             const supportedProviders = Object.keys(providerConfigs).join(', ');
-            throw new Error(`Unsupported provider: ${this.provider}. Supported providers: ${supportedProviders}`);
+            throw new Error(`Unsupported secondary provider: ${this.provider}. Supported: ${supportedProviders}`);
         }
 
-        // Create and return the client instance
         return clientFactory();
     }
 
     /**
-     * Get the appropriate model name for the current provider
-     *
-     * @private
-     * @returns {string} Model identifier for API calls
+     * Get the secondary model name for the current provider
      */
-    getModelName() {
+    getSecondaryModelName() {
         const modelMap = {
-            'openai': 'gpt-4o',                          // Latest GPT-4 optimized model
-            'groq': 'llama3-70b-8192',                   // Llama 3 70B with 8K context
-            'anthropic': 'claude-3-sonnet-20240229',     // Claude 3 Sonnet
-            'cerebras': 'llama-3.3-70b'                   // llama 3
+            'openai': 'gpt-4o',
+            'groq': 'llama3-70b-8192',
+            'anthropic': 'claude-3-sonnet-20240229',
+            'cerebras': 'llama-3.3-70b'
         };
 
-        return modelMap[this.provider] || 'llama3.3-70b';  // Default fallback
+        return modelMap[this.provider] || 'llama-3.3-70b';
     }
 
     /**
-     * Create a unique cache key for individual requests
-     *
-     * Cache Key Strategy:
-     * - Combines IP, method, URL, and payload for uniqueness
-     * - Ensures different requests from same IP are cached separately
-     * - Deterministic key generation for consistent lookup
-     *
-     * @private
-     * @param {Object} logEntry - Request log entry containing request details
-     * @returns {string} Unique request identifier for caching
-     * @throws {Error} If log entry is invalid or missing required fields
+     * Create request key for caching (same as before)
      */
     createRequestKey(logEntry) {
-        // Validate required fields
         if (!logEntry || !logEntry.ip) {
             throw new Error('Invalid log entry: IP address is required for cache key generation');
         }
 
-        // Build deterministic key from request components
         const keyComponents = [
-            logEntry.ip,                                    // Source IP address
-            logEntry.method || 'UNKNOWN',                   // HTTP method (GET, POST, etc.)
-            logEntry.url || '',                             // Requested URL path
-            JSON.stringify(logEntry.payload || {})          // Request payload/body
+            logEntry.ip,
+            logEntry.method || 'UNKNOWN',
+            logEntry.url || '',
+            JSON.stringify(logEntry.payload || {})
         ];
 
         return keyComponents.join('_');
     }
 
     /**
-     * Add a request to the IP's processing queue for cleanup tracking
-     *
-     * Queue Management:
-     * - Tracks which requests belong to which IP
-     * - Enables bulk cleanup when IP becomes malicious
-     * - Maintains referential integrity between caches
-     *
-     * @private
-     * @param {string} ip - IP address
-     * @param {string} requestKey - Unique request identifier
+     * Add request to IP processing queue (same as before)
      */
     addToQueue(ip, requestKey) {
-        // Initialize queue for new IPs
         if (!this.ipRequestQueue.has(ip)) {
             this.ipRequestQueue.set(ip, new Set());
         }
-
-        // Add request to IP's queue
         this.ipRequestQueue.get(ip).add(requestKey);
     }
 
     /**
-     * Clean up all cached data for a malicious IP
-     *
-     * Cleanup Strategy:
-     * - Remove all individual request cache entries for the malicious IP
-     * - Clear the IP from queue tracking
-     * - Preserve the IP-level malicious marking for future blocking
-     * - Log cleanup statistics for monitoring
-     *
-     * @private
-     * @param {string} ip - IP address to clean up
+     * Clean up cached data for malicious IP (same as before)
      */
     cleanupMaliciousIP(ip) {
         const requests = this.ipRequestQueue.get(ip);
-        if (!requests) {
-            return; // No cleanup needed if IP has no tracked requests
-        }
+        if (!requests) return;
 
-        // Remove all cached requests for this malicious IP
         let cleanedCount = 0;
         requests.forEach(requestKey => {
             if (this.requestCache.delete(requestKey)) {
@@ -245,229 +221,413 @@ class LLMAnalyzer {
             }
         });
 
-        // Clear the IP's request queue
         this.ipRequestQueue.delete(ip);
-
-        console.log(`Cleaned up ${cleanedCount} cached requests from malicious IP: ${ip}`);
+        console.log(`[CLEANUP] Removed ${cleanedCount} cached requests from malicious IP: ${ip}`);
     }
 
     /**
-     * Main analysis method with comprehensive caching and error handling
+     * Main two-tier analysis method with intelligent routing
      *
-     * Analysis Flow:
-     * 1. Validate input and create request key
-     * 2. Check IP-level cache for known malicious IPs (immediate blocking)
-     * 3. Check request-level cache for identical previous requests
-     * 4. Perform fresh LLM analysis if no cache hit
-     * 5. Cache results and handle malicious IP detection
-     * 6. Return structured analysis result
+     * Two-Tier Analysis Flow:
+     * 1. Check caches for existing results
+     * 2. Try primary model first (fast decision)
+     * 3. If primary returns UNCERTAIN, escalate to secondary model
+     * 4. Cache and return final result
      *
      * @param {Object} logEntry - Request log entry to analyze
      * @param {Object} threatResult - Initial automated threat detection results
-     * @returns {Promise<Object>} Comprehensive analysis result with confidence scoring
+     * @returns {Promise<Object>} Comprehensive analysis result
      */
     async analyze(logEntry, threatResult) {
-        // Input validation
         if (!logEntry || !logEntry.ip) {
             throw new Error('Invalid log entry: IP address is required for analysis');
         }
 
         const ip = logEntry.ip;
+        const analysisId = `${ip}-${Date.now()}`;
         let requestKey;
 
-        // Generate unique request identifier
+        console.log(`[${analysisId}] Starting two-tier analysis for IP: ${ip}`);
+
         try {
             requestKey = this.createRequestKey(logEntry);
         } catch (error) {
-            console.error('Error creating request key:', error.message);
+            console.error(`[${analysisId}] Error creating request key:`, error.message);
             return this.createErrorResult('Invalid request format', error.message);
         }
 
         try {
-            // Track total analysis requests for metrics
+            // Update total request counter
+            this.tierStats.totalRequests++;
             this.cacheMetadata.totalAnalyzed++;
 
-            // FIRST PRIORITY: Check if IP is already marked as malicious
-            // This provides immediate blocking for known threats
+            // STEP 1: Check IP-level cache for known malicious IPs
             if (this.ipCache.has(ip)) {
                 const cachedResult = this.ipCache.get(ip);
-
-                // If IP has high confidence malicious rating, block immediately
                 if (cachedResult.confidence >= this.config.maliciousConfidenceThreshold) {
-                    console.log(`IP ${ip} already marked as malicious (confidence: ${cachedResult.confidence}) - blocking immediately`);
+                    console.log(`[${analysisId}] IP already marked as malicious (confidence: ${cachedResult.confidence}) - blocking immediately`);
                     this.cacheMetadata.cacheHits++;
-
                     return {
                         ...cachedResult,
                         explanation: `IP previously identified as malicious with confidence ${cachedResult.confidence} - auto-blocked`,
-                        fromCache: true
+                        fromCache: true,
+                        tier: 'cache'
                     };
                 }
             }
 
-            // SECOND PRIORITY: Check for exact request match in cache
-            // This avoids re-analyzing identical requests
+            // STEP 2: Check request-level cache
             if (this.requestCache.has(requestKey)) {
-                console.log('Using cached analysis for identical request');
+                console.log(`[${analysisId}] Using cached analysis for identical request`);
                 this.cacheMetadata.cacheHits++;
-
                 const cachedResult = this.requestCache.get(requestKey);
                 return { ...cachedResult, fromCache: true };
             }
 
-            // CACHE MISS: Perform fresh analysis
+            // STEP 3: Cache miss - perform two-tier analysis
             this.cacheMetadata.cacheMisses++;
-            console.log(`Cache miss - performing fresh analysis for IP ${ip}`);
+            console.log(`[${analysisId}] Cache miss - starting two-tier analysis`);
 
-            // Add to processing queue for potential cleanup
             this.addToQueue(ip, requestKey);
 
-            // Perform the actual LLM analysis
-            const analysisResult = await this.performAnalysis(logEntry, threatResult);
-
-            // Preserve system URL attribute from initial threat detection
-            if (!analysisResult.is_system_url && threatResult?.is_system_url) {
-                analysisResult.is_system_url = true;
-            }
-
-            // Cache the fresh analysis result (only if successful)
-            // Don't cache error results to prevent serving stale failures
-            if (analysisResult.confidence > 0 && !analysisResult.error) {
-                this.requestCache.set(requestKey, analysisResult);
-                console.log(`Cached successful analysis result for IP ${ip} (confidence: ${analysisResult.confidence})`);
+            // Try primary model first (if enabled)
+            let finalResult;
+            if (this.options.enablePrimaryModel && this.primaryModel) {
+                finalResult = await this.performTwoTierAnalysis(logEntry, threatResult, analysisId);
             } else {
-                console.log(`Skipping cache storage for failed analysis (confidence: ${analysisResult.confidence}, error: ${!!analysisResult.error})`);
+                // Fallback to secondary model only
+                console.log(`[${analysisId}] Primary model disabled - using secondary model directly`);
+                finalResult = await this.performSecondaryAnalysis(logEntry, threatResult, analysisId);
+                finalResult.tier = 'secondary-direct';
             }
 
-            // MALICIOUS IP HANDLING: If analysis indicates high-confidence threat
-            if (analysisResult.confidence >= this.config.maliciousConfidenceThreshold) {
-                // Mark IP as malicious for future immediate blocking
-                this.ipCache.set(ip, analysisResult);
+            // Preserve system URL attribute
+            if (!finalResult.is_system_url && threatResult?.is_system_url) {
+                finalResult.is_system_url = true;
+            }
 
-                // Clean up all other cached requests from this IP
+            // Cache successful results
+            if (finalResult.confidence > 0 && !finalResult.error) {
+                this.requestCache.set(requestKey, finalResult);
+                console.log(`[${analysisId}] Cached analysis result (confidence: ${finalResult.confidence})`);
+            }
+
+            // Handle malicious IP detection
+            if (finalResult.confidence >= this.config.maliciousConfidenceThreshold) {
+                this.ipCache.set(ip, finalResult);
                 this.cleanupMaliciousIP(ip);
-
-                console.log(`IP ${ip} marked as malicious with confidence ${analysisResult.confidence}`);
+                console.log(`[${analysisId}] IP marked as malicious with confidence ${finalResult.confidence}`);
             }
 
-            // Perform periodic cache maintenance
+            // Update tier statistics
+            this.updateTierStats();
+
+            // Perform cache maintenance
             this.maintainCacheSize();
 
-            return analysisResult;
+            return finalResult;
 
         } catch (error) {
-            console.error(`Analysis error for IP ${ip}:`, error.message);
-            console.error('Stack trace:', error.stack);
-
-            // Return structured error result for graceful degradation
-            return this.createErrorResult('Analysis failed due to system error', error.message);
+            console.error(`[${analysisId}] Analysis error:`, error.message);
+            return this.createErrorResult('Two-tier analysis failed', error.message);
         }
     }
 
     /**
-     * Perform the actual LLM analysis without retry logic
-     *
-     * Analysis Process:
-     * 1. Build comprehensive analysis prompt
-     * 2. Route to appropriate provider-specific method
-     * 3. Parse and validate LLM response
-     * 4. Return structured result or error
+     * Perform complete two-tier analysis with primary → secondary escalation
      *
      * @private
      * @param {Object} logEntry - Request log entry
-     * @param {Object} threatResult - Initial automated threat detection results
-     * @returns {Promise<Object>} Analysis result
+     * @param {Object} threatResult - Initial threat detection results
+     * @param {string} analysisId - Unique analysis identifier for logging
+     * @returns {Promise<Object>} Final analysis result
      */
-    async performAnalysis(logEntry, threatResult) {
-        const prompt = this.buildAnalysisPrompt(logEntry, threatResult);
+    async performTwoTierAnalysis(logEntry, threatResult, analysisId) {
+        console.log(`[${analysisId}] Starting primary tier analysis...`);
 
         try {
-            console.log(`Starting LLM analysis for IP ${logEntry.ip}`);
-
-            let response;
-
-            // Route to appropriate provider method
-            switch (this.provider) {
-                case 'openai':
-                case 'groq':
-                case 'cerebras':
-                    response = await this.analyzeWithOpenAIFormat(prompt);
-                    break;
-                case 'anthropic':
-                    response = await this.analyzeWithAnthropic(prompt);
-                    break;
-                default:
-                    throw new Error(`Unsupported provider: ${this.provider}`);
+            // Initialize primary model if not already done
+            if (!this.primaryModel.isInitialized) {
+                console.log(`[${analysisId}] Initializing primary model...`);
+                await this.primaryModel.initialize();
             }
 
-            // Parse the LLM response into structured format
-            const result = this.parseResponse(response);
+            // TIER 1: Primary model analysis
+            const primaryStartTime = Date.now();
+            const primaryResult = await Promise.race([
+                this.primaryModel.analyze(logEntry),
+                new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('Primary model timeout')), this.config.primaryTimeoutMs)
+                )
+            ]);
+            const primaryTime = Date.now() - primaryStartTime;
 
-            // Validate the parsed result structure
-            if (this.validateAnalysisResult(result)) {
-                console.log(`Analysis completed successfully for IP ${logEntry.ip} (confidence: ${result.confidence})`);
-                return result;
-            } else {
-                throw new Error('Invalid analysis result format returned by LLM');
+            console.log(`[${analysisId}] Primary tier decision: ${primaryResult.decision} (${primaryTime}ms)`);
+
+            // Update primary timing stats
+            this.updatePrimaryStats(primaryTime);
+
+            // Check if primary model resolved the request
+            if (primaryResult.decision !== 'UNCERTAIN' && !primaryResult.error) {
+                this.tierStats.primaryResolved++;
+
+                // Convert primary result to final format
+                const finalResult = this.convertPrimaryResult(primaryResult, analysisId);
+                finalResult.analysisTime = primaryTime;
+
+                console.log(`[${analysisId}] Request resolved by primary tier (confidence: ${finalResult.confidence})`);
+                return finalResult;
             }
+
+            // TIER 2: Escalate to secondary model
+            console.log(`[${analysisId}] Escalating to secondary tier - reason: ${primaryResult.explanation}`);
+            this.tierStats.secondaryEscalated++;
+
+            const secondaryResult = await this.performSecondaryAnalysis(
+                logEntry,
+                threatResult,
+                analysisId,
+                primaryResult  // Pass primary result as context
+            );
+
+            // Combine timing information
+            secondaryResult.analysisTime = primaryTime + (secondaryResult.analysisTime || 0);
+            secondaryResult.primaryTime = primaryTime;
+            secondaryResult.escalationReason = primaryResult.explanation;
+
+            return secondaryResult;
 
         } catch (error) {
-            console.error(`Analysis failed for IP ${logEntry.ip}:`, error.message);
+            console.error(`[${analysisId}] Primary tier analysis failed:`, error.message);
+            this.tierStats.primaryErrors++;
 
-            // Return structured error result instead of throwing
-            return this.createErrorResult('LLM analysis failed', error?.message || 'Unknown error');
+            // Fallback to secondary model
+            console.log(`[${analysisId}] Falling back to secondary tier due to primary error`);
+            const fallbackResult = await this.performSecondaryAnalysis(logEntry, threatResult, analysisId);
+            fallbackResult.primaryError = error.message;
+            fallbackResult.tier = 'secondary-fallback';
+
+            return fallbackResult;
         }
     }
 
     /**
-     * Create a standardized error result for graceful failure handling
-     *
-     * Error Result Structure:
-     * - Sets safe defaults that won't trigger false blocks
-     * - Includes error details for debugging
-     * - Flags result for manual review
-     * - Maintains consistent result structure
+     * Convert primary model result to final analysis format
      *
      * @private
-     * @param {string} message - Primary error message
-     * @param {string} details - Detailed error information
-     * @returns {Object} Structured error result
+     * @param {Object} primaryResult - Primary model result
+     * @param {string} analysisId - Analysis identifier
+     * @returns {Object} Converted final result
      */
-    createErrorResult(message, details = '') {
+    convertPrimaryResult(primaryResult, analysisId) {
+        let isMalicious, shouldBlock, impact;
+
+        // Map primary decision to final format
+        switch (primaryResult.decision) {
+            case 'MALICIOUS':
+                isMalicious = true;
+                shouldBlock = true;
+                impact = 'HIGH';
+                break;
+            case 'BENIGN':
+                isMalicious = false;
+                shouldBlock = false;
+                impact = 'NONE';
+                break;
+            default:
+                // This shouldn't happen if primary model works correctly
+                isMalicious = null;
+                shouldBlock = false;
+                impact = 'UNKNOWN';
+                break;
+        }
+
         return {
-            isMalicious: null,                          // Uncertain status
-            confidence: 0,                              // No confidence in result
-            explanation: `${message}${details ? ` - ${details}` : ''} - manual review recommended`,
-            error: details,                             // Technical error details
-            requiresManualReview: true,                 // Flag for human review
-            shouldBlock: false,                         // Don't auto-block on errors
-            impact: 'UNKNOWN',                          // Unknown impact level
-            attackType: null,                           // No attack type identified
-            fromCache: false,                           // Fresh (failed) analysis
+            isMalicious,
+            confidence: primaryResult.confidence,
+            explanation: `[PRIMARY] ${primaryResult.explanation}`,
+            attackType: isMalicious ? 'DETECTED_BY_PRIMARY' : null,
+            shouldBlock,
+            impact,
+            requiresManualReview: false,
+            is_system_url: false,
+            toolsUsed: [],  // Primary model doesn't use tools
+            intelligenceBoost: 'N/A - primary model decision',
+            patternDetected: 'Fast pattern recognition',
+            tier: 'primary',
+            model: primaryResult.model,
+            fromCache: false,
+            responseTime: primaryResult.responseTime || 0
         };
     }
 
     /**
-     * Validate analysis result structure and required fields
-     *
-     * Validation Checks:
-     * - Ensures result is a valid object
-     * - Verifies all required fields are present
-     * - Validates confidence score range (0-10)
-     * - Logs specific validation failures for debugging
+     * Perform secondary (advanced) analysis with full tool calling support
      *
      * @private
-     * @param {Object} result - Analysis result to validate
-     * @returns {boolean} Whether result passes validation
+     * @param {Object} logEntry - Request log entry
+     * @param {Object} threatResult - Initial threat detection
+     * @param {string} analysisId - Analysis identifier
+     * @param {Object} primaryResult - Optional primary model result for context
+     * @returns {Promise<Object>} Secondary analysis result
      */
+    async performSecondaryAnalysis(logEntry, threatResult, analysisId, primaryResult = null) {
+        console.log(`[${analysisId}] Starting secondary tier analysis...`);
+
+        const secondaryStartTime = Date.now();
+
+        try {
+            // Build enhanced prompt with primary context if available
+            const prompt = this.buildSecondaryPrompt(logEntry, threatResult, primaryResult);
+
+            let response;
+            switch (this.provider) {
+                case 'openai':
+                case 'groq':
+                case 'cerebras':
+                    response = await this.analyzeWithOpenAIFormat(prompt, analysisId);
+                    break;
+                case 'anthropic':
+                    response = await this.analyzeWithAnthropic(prompt, analysisId);
+                    break;
+                default:
+                    throw new Error(`Unsupported secondary provider: ${this.provider}`);
+            }
+
+            const secondaryTime = Date.now() - secondaryStartTime;
+            this.updateSecondaryStats(secondaryTime);
+
+            // Parse response into final format
+            const result = this.parseResponse(response);
+
+            if (this.validateAnalysisResult(result)) {
+                result.tier = 'secondary';
+                result.analysisTime = secondaryTime;
+                result.model = this.getSecondaryModelName();
+                result.fromCache = false;
+
+                console.log(`[${analysisId}] Secondary analysis completed (confidence: ${result.confidence}, time: ${secondaryTime}ms)`);
+                return result;
+            } else {
+                throw new Error('Invalid analysis result format from secondary model');
+            }
+
+        } catch (error) {
+            console.error(`[${analysisId}] Secondary analysis failed:`, error.message);
+            return this.createErrorResult('Secondary model analysis failed', error.message);
+        }
+    }
+
+    /**
+     * Build enhanced prompt for secondary model with primary context
+     *
+     * @private
+     * @param {Object} logEntry - Request log entry
+     * @param {Object} threatResult - Initial threat detection
+     * @param {Object} primaryResult - Primary model result (if available)
+     * @returns {string} Enhanced analysis prompt
+     */
+    buildSecondaryPrompt(logEntry, threatResult, primaryResult = null) {
+        let prompt = `ADVANCED THREAT ASSESSMENT REQUEST
+
+REQUEST DETAILS:
+IP: ${logEntry.ip}
+Method: ${logEntry.method || 'UNKNOWN'}
+URL: ${logEntry.url || 'Not specified'}
+Query: ${logEntry.queryString || 'None'}
+User-Agent: ${logEntry.userAgent || 'None'}
+Status: ${logEntry.status || 'Unknown'}
+System URL: ${threatResult?.is_system_url ? 'YES' : 'NO'}
+
+AUTOMATED DETECTION:
+Threats Found: ${threatResult?.threats ? threatResult.threats.map(t => `${t.type} (${t.confidence})`).join(', ') : 'None'}
+Initial Score: ${threatResult?.confidence || 0}/10`;
+
+        // Add primary model context if available
+        if (primaryResult) {
+            prompt += `
+
+PRIMARY MODEL ASSESSMENT:
+Decision: ${primaryResult.decision}
+Confidence: ${primaryResult.confidence}
+Reasoning: ${primaryResult.explanation}
+Model: ${primaryResult.model}
+Response Time: ${primaryResult.responseTime}ms
+
+NOTE: Primary model was uncertain about this request. As the advanced secondary model with tool access, 
+provide a definitive assessment using available intelligence tools when helpful.`;
+        }
+
+        prompt += `
+
+PAYLOAD:
+${logEntry.payload ? JSON.stringify(logEntry.payload, null, 2) : 'No payload'}
+
+ADVANCED ANALYSIS INSTRUCTIONS:
+As the secondary (advanced) model, you have access to external intelligence tools and should provide 
+a definitive assessment. Use tools strategically when they add value to your decision.
+
+Your confidence score determines blocking (8+ = blocked). Analyze comprehensively and respond.`;
+
+        return prompt;
+    }
+
+    /**
+     * Update primary tier performance statistics
+     */
+    updatePrimaryStats(responseTime) {
+        const totalPrimary = this.tierStats.primaryResolved + this.tierStats.primaryErrors;
+        this.tierStats.averagePrimaryTime = totalPrimary > 0
+            ? (this.tierStats.averagePrimaryTime * (totalPrimary - 1) + responseTime) / totalPrimary
+            : responseTime;
+    }
+
+    /**
+     * Update secondary tier performance statistics
+     */
+    updateSecondaryStats(responseTime) {
+        const totalSecondary = this.tierStats.secondaryEscalated;
+        this.tierStats.averageSecondaryTime = totalSecondary > 0
+            ? (this.tierStats.averageSecondaryTime * (totalSecondary - 1) + responseTime) / totalSecondary
+            : responseTime;
+    }
+
+    /**
+     * Update overall tier statistics
+     */
+    updateTierStats() {
+        if (this.tierStats.totalRequests > 0) {
+            this.tierStats.escalationRate =
+                (this.tierStats.secondaryEscalated / this.tierStats.totalRequests * 100).toFixed(1);
+        }
+    }
+
+    /**
+     * Create standardized error result (same as before but with tier info)
+     */
+    createErrorResult(message, details = '') {
+        return {
+            isMalicious: null,
+            confidence: 0,
+            explanation: `${message}${details ? ` - ${details}` : ''} - manual review recommended`,
+            error: details,
+            requiresManualReview: true,
+            shouldBlock: false,
+            impact: 'UNKNOWN',
+            attackType: null,
+            fromCache: false,
+            tier: 'error'
+        };
+    }
+
+
+
     validateAnalysisResult(result) {
-        // Basic type checking
         if (!result || typeof result !== 'object') {
             console.error('Analysis result is not a valid object');
             return false;
         }
 
-        // Required field validation
         const requiredFields = ['confidence', 'explanation'];
         for (const field of requiredFields) {
             if (!(field in result)) {
@@ -476,7 +636,6 @@ class LLMAnalyzer {
             }
         }
 
-        // Confidence score validation
         if (typeof result.confidence !== 'number' || result.confidence < 0 || result.confidence > 10) {
             console.error(`Invalid confidence score: ${result.confidence} (must be number between 0-10)`);
             return false;
@@ -485,80 +644,36 @@ class LLMAnalyzer {
         return true;
     }
 
-    /**
-     * Maintain cache size limits and perform cleanup
-     *
-     * Cache Maintenance Strategy:
-     * - Remove oldest entries when limits are exceeded
-     * - Prioritize keeping high-value malicious IP entries
-     * - Log cleanup operations for monitoring
-     * - Use FIFO (First In, First Out) eviction policy
-     *
-     * @private
-     */
     maintainCacheSize() {
-        // Clean up IP cache if it exceeds configured limit
         if (this.ipCache.size > this.config.maxIpCacheSize) {
             const excessCount = this.ipCache.size - this.config.maxIpCacheSize;
-
-            // Get oldest entries for removal (FIFO eviction)
             const keysToRemove = Array.from(this.ipCache.keys()).slice(0, excessCount);
-
-            // Remove excess entries
             keysToRemove.forEach(key => this.ipCache.delete(key));
             console.log(`Cache maintenance: Cleaned up ${excessCount} entries from IP cache`);
         }
 
-        // Clean up request cache if it exceeds configured limit
         if (this.requestCache.size > this.config.maxRequestCacheSize) {
             const excessCount = this.requestCache.size - this.config.maxRequestCacheSize;
-
-            // Get oldest entries for removal (FIFO eviction)
             const keysToRemove = Array.from(this.requestCache.keys()).slice(0, excessCount);
-
-            // Remove excess entries
             keysToRemove.forEach(key => this.requestCache.delete(key));
             console.log(`Cache maintenance: Cleaned up ${excessCount} entries from request cache`);
         }
     }
 
-    /**
-     * Start periodic cache maintenance operations
-     *
-     * Maintenance Operations:
-     * - Runs on configured interval (default: hourly)
-     * - Maintains cache size limits
-     * - Updates maintenance metadata
-     * - Logs completion for monitoring
-     *
-     * @private
-     */
     startCacheMaintenance() {
         setInterval(() => {
             console.log('Starting periodic cache maintenance...');
-
             this.maintainCacheSize();
             this.cacheMetadata.lastCleanup = Date.now();
 
             const stats = this.getCacheStats();
             console.log(`Cache maintenance completed - IP Cache: ${stats.ipCache}, Request Cache: ${stats.requestCache}, Hit Rate: ${stats.hitRate}`);
-
         }, this.config.cacheCleanupInterval);
 
         console.log(`Periodic cache maintenance scheduled every ${this.config.cacheCleanupInterval / 1000 / 60} minutes`);
     }
 
-    /**
-     * Get function tool definitions for LLM function calling
-     *
-     * Available Tools:
-     * - checkVirusTotal: IP reputation checking via VirusTotal API
-     * - checkAbuseIPDB: Historical abuse data from AbuseIPDB
-     * - storeMonitoringLog: Pattern analysis and monitoring storage
-     *
-     * @private
-     * @returns {Array} OpenAI-compatible function tool definitions
-     */
+    // [Continue with tool-related methods - same as original]
     getFunctionTools() {
         return [
             {
@@ -632,39 +747,18 @@ class LLMAnalyzer {
         ];
     }
 
-    /**
-     * Get function name to implementation mapping for execution
-     *
-     * @private
-     * @returns {Object} Function name to implementation mapping
-     */
     getAvailableFunctions() {
         return {
-            "checkVirusTotal": checkVirusTotal,         // VirusTotal IP reputation checking
-            "checkAbuseIPDB": checkAbuseIPDB,           // AbuseIPDB historical data
-            "storeMonitoringLog": storeMonitoringLog    // Pattern monitoring and storage
+            "checkVirusTotal": checkVirusTotal,
+            "checkAbuseIPDB": checkAbuseIPDB,
+            "storeMonitoringLog": storeMonitoringLog
         };
     }
 
-    /**
-     * Execute a function call requested by the LLM
-     *
-     * Function Execution:
-     * - Validates function exists and arguments are correct
-     * - Provides function-specific argument handling
-     * - Returns structured results for LLM consumption
-     * - Handles errors gracefully without breaking analysis
-     *
-     * @private
-     * @param {string} functionName - Name of function to execute
-     * @param {Object} functionArgs - Arguments for the function call
-     * @returns {Promise<*>} Function execution result
-     */
     async executeFunctionCall(functionName, functionArgs) {
         const availableFunctions = this.getAvailableFunctions();
         const functionToCall = availableFunctions[functionName];
 
-        // Validate function exists
         if (!functionToCall) {
             throw new Error(`Function ${functionName} not found in available functions`);
         }
@@ -674,11 +768,9 @@ class LLMAnalyzer {
         try {
             let result;
 
-            // Handle function-specific argument patterns
             switch (functionName) {
                 case 'checkVirusTotal':
                 case 'checkAbuseIPDB':
-                    // IP reputation checking functions
                     if (!functionArgs.ip) {
                         throw new Error(`IP address is required for ${functionName}`);
                     }
@@ -686,13 +778,10 @@ class LLMAnalyzer {
                     break;
 
                 case 'storeMonitoringLog':
-                    // Pattern monitoring function
                     const { logEntry, confidenceScore, explanation } = functionArgs;
-
                     if (!logEntry || confidenceScore === undefined || !explanation) {
                         throw new Error('Missing required arguments for storeMonitoringLog (logEntry, confidenceScore, explanation)');
                     }
-
                     result = await functionToCall(logEntry, confidenceScore, explanation);
                     break;
 
@@ -705,34 +794,11 @@ class LLMAnalyzer {
 
         } catch (error) {
             console.error(`Error executing function ${functionName}:`, error.message);
-
-            // Re-throw with more context for LLM
             throw new Error(`Function execution failed: ${error.message}`);
         }
     }
 
-    /**
-     * Analyze request using OpenAI-compatible API format with tool support
-     *
-     * OpenAI Analysis Flow:
-     * 1. Send initial request with available tools
-     * 2. Process any tool calls sequentially (prevents race conditions)
-     * 3. Send tool results back to LLM for final analysis
-     * 4. Return final analysis incorporating tool intelligence
-     *
-     * @private
-     * @param {string} prompt - Analysis prompt for the LLM
-     * @returns {Promise<string>} Final analysis response from LLM
-     */
-    /**
-     * Analyze request using OpenAI-compatible API format with intelligent tool support
-     * Supports multiple tool calling rounds, parallel execution, and loop prevention
-     *
-     * @private
-     * @param {string} prompt - Analysis prompt for the LLM
-     * @returns {Promise<string>} Final analysis response from LLM
-     */
-    async analyzeWithOpenAIFormat(prompt) {
+    async analyzeWithOpenAIFormat(prompt, analysisId = 'unknown') {
         const tools = this.getFunctionTools();
         const messages = [
             {
@@ -745,16 +811,15 @@ class LLMAnalyzer {
             }
         ];
 
-        const maxToolRounds = 3; // Prevent infinite loops
+        const maxToolRounds = 3;
         let currentRound = 0;
-        const executedTools = new Set(); // Track executed tools to prevent duplicates
+        const executedTools = new Set();
 
         try {
-            console.log(`Making ${this.provider} API call with advanced tool support enabled`);
+            console.log(`[${analysisId}] Making ${this.provider} API call with advanced tool support enabled`);
 
-            // Initial completion request with tools available
-            let completion = await this.client.chat.completions.create({
-                model: this.getModelName(),
+            let completion = await this.secondaryClient.chat.completions.create({
+                model: this.getSecondaryModelName(),
                 messages: messages,
                 temperature: 0.1,
                 max_tokens: 800,
@@ -764,7 +829,7 @@ class LLMAnalyzer {
             });
 
             if (!completion.choices || completion.choices.length === 0) {
-                console.error('API Response:', JSON.stringify(completion, null, 2));
+                console.error(`[${analysisId}] API Response:`, JSON.stringify(completion, null, 2));
                 throw new Error('No response choices returned from LLM API');
             }
 
@@ -776,29 +841,26 @@ class LLMAnalyzer {
             // Tool calling loop with intelligent termination
             while (responseMessage.tool_calls && responseMessage.tool_calls.length > 0 && currentRound < maxToolRounds) {
                 currentRound++;
-                console.log(`=== Tool Calling Round ${currentRound}/${maxToolRounds} ===`);
+                console.log(`[${analysisId}] === Tool Calling Round ${currentRound}/${maxToolRounds} ===`);
 
                 const toolCalls = responseMessage.tool_calls;
-                console.log(`Processing ${toolCalls.length} tool call(s) in round ${currentRound}`);
+                console.log(`[${analysisId}] Processing ${toolCalls.length} tool call(s) in round ${currentRound}`);
 
-                // Add the assistant's response with tool calls to message history
                 messages.push(responseMessage);
 
-                // Determine execution strategy based on provider and tool types
                 const executionStrategy = this.determineExecutionStrategy(toolCalls, this.provider);
-                console.log(`Using execution strategy: ${executionStrategy}`);
+                console.log(`[${analysisId}] Using execution strategy: ${executionStrategy}`);
 
                 if (executionStrategy === 'parallel') {
-                    await this.executeToolCallsParallel(toolCalls, messages, executedTools);
+                    await this.executeToolCallsParallel(toolCalls, messages, executedTools, analysisId);
                 } else {
-                    await this.executeToolCallsSequential(toolCalls, messages, executedTools);
+                    await this.executeToolCallsSequential(toolCalls, messages, executedTools, analysisId);
                 }
 
-                // Request next completion with updated context
-                console.log(`Requesting completion after tool round ${currentRound}`);
+                console.log(`[${analysisId}] Requesting completion after tool round ${currentRound}`);
 
                 const nextCompletionConfig = {
-                    model: this.getModelName(),
+                    model: this.getSecondaryModelName(),
                     messages: messages,
                     temperature: 0.1,
                     max_tokens: 600,
@@ -806,19 +868,15 @@ class LLMAnalyzer {
                     tool_choice: "auto",
                 };
 
-                // Cerebras-specific adjustments for better tool handling
                 if (this.provider === 'cerebras') {
-                    // Add explicit guidance for Cerebras
                     messages.push({
                         role: "user",
                         content: `Round ${currentRound} complete. If you have all needed information, provide your final assessment in the required format. If you need more tools, call them now.`
                     });
-
-                    // Slightly reduce max tokens to encourage completion
                     nextCompletionConfig.max_tokens = 500;
                 }
 
-                completion = await this.client.chat.completions.create(nextCompletionConfig);
+                completion = await this.secondaryClient.chat.completions.create(nextCompletionConfig);
 
                 if (!completion.choices || completion.choices.length === 0) {
                     throw new Error(`No response choices returned in tool round ${currentRound}`);
@@ -829,111 +887,74 @@ class LLMAnalyzer {
                     throw new Error(`Empty response message in tool round ${currentRound}`);
                 }
 
-                // Check for completion indicators
                 if (this.hasAnalysisContent(responseMessage)) {
-                    console.log(`Analysis content detected in round ${currentRound} - completing`);
+                    console.log(`[${analysisId}] Analysis content detected in round ${currentRound} - completing`);
                     break;
                 }
 
-                // Detect potential loops
                 if (this.detectToolLoop(responseMessage.tool_calls, executedTools)) {
-                    console.warn(`Tool loop detected in round ${currentRound} - forcing completion`);
-                    return this.forceCompletionWithContext(messages, executedTools);
+                    console.warn(`[${analysisId}] Tool loop detected in round ${currentRound} - forcing completion`);
+                    return this.forceCompletionWithContext(messages, executedTools, analysisId);
                 }
             }
 
-            // Handle final response
             if (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
-                // Hit max rounds with pending tool calls
-                console.warn(`Maximum tool rounds (${maxToolRounds}) reached with pending tool calls`);
-                return this.forceCompletionWithContext(messages, executedTools);
+                console.warn(`[${analysisId}] Maximum tool rounds (${maxToolRounds}) reached with pending tool calls`);
+                return this.forceCompletionWithContext(messages, executedTools, analysisId);
             }
 
-            // Final analysis content
             if (!responseMessage.content || responseMessage.content.trim() === '') {
-                console.warn('Empty content in final response after tool execution');
-                return this.forceCompletionWithContext(messages, executedTools);
+                console.warn(`[${analysisId}] Empty content in final response after tool execution`);
+                return this.forceCompletionWithContext(messages, executedTools, analysisId);
             }
 
-            console.log(`Analysis completed successfully after ${currentRound} tool rounds`);
+            console.log(`[${analysisId}] Analysis completed successfully after ${currentRound} tool rounds`);
             return responseMessage.content;
 
         } catch (error) {
-            console.error(`Error in ${this.provider} API call:`, error.message);
-            console.error('Error stack:', error.stack);
-
-            if (error.message.includes('tool')) {
-                console.error('Tool-related error occurred');
-                console.error('Messages sent to API:', JSON.stringify(messages.slice(-3), null, 2)); // Last 3 messages for context
-            }
-
+            console.error(`[${analysisId}] Error in ${this.provider} API call:`, error.message);
             throw new Error(`${this.provider} API error: ${error.message}`);
         }
     }
 
-    /**
-     * Determine optimal execution strategy for tool calls
-     *
-     * @private
-     * @param {Array} toolCalls - Array of tool calls to execute
-     * @param {string} provider - LLM provider name
-     * @returns {string} 'parallel' or 'sequential'
-     */
     determineExecutionStrategy(toolCalls, provider) {
-        // Always use sequential for single tool calls
         if (toolCalls.length === 1) {
             return 'sequential';
         }
 
-        // Check if tools are independent (can run in parallel)
         const toolTypes = toolCalls.map(call => call.function.name);
         const hasStorageTools = toolTypes.includes('storeMonitoringLog');
         const hasIPChecks = toolTypes.includes('checkAbuseIPDB') || toolTypes.includes('checkVirusTotal');
 
-        // If mixing storage with IP checks, use sequential to ensure data consistency
         if (hasStorageTools && hasIPChecks) {
             console.log('Mixed tool types detected - using sequential execution for data consistency');
             return 'sequential';
         }
 
-        // Multiple IP reputation checks can run in parallel
         if (toolTypes.every(tool => ['checkAbuseIPDB', 'checkVirusTotal'].includes(tool))) {
             console.log('Multiple IP reputation checks - using parallel execution');
             return 'parallel';
         }
 
-        // Provider-specific preferences
         if (provider === 'cerebras') {
-            // Cerebras seems to handle sequential better
             return 'sequential';
         }
 
-        // Default to parallel for independent operations
         return 'parallel';
     }
 
-    /**
-     * Execute tool calls in parallel
-     *
-     * @private
-     * @param {Array} toolCalls - Tool calls to execute
-     * @param {Array} messages - Message history
-     * @param {Set} executedTools - Set of executed tool signatures
-     */
-    async executeToolCallsParallel(toolCalls, messages, executedTools) {
-        console.log(`Executing ${toolCalls.length} tools in parallel`);
+    async executeToolCallsParallel(toolCalls, messages, executedTools, analysisId) {
+        console.log(`[${analysisId}] Executing ${toolCalls.length} tools in parallel`);
 
-        // Create promises for all tool executions
         const toolPromises = toolCalls.map(async (toolCall) => {
             const functionName = this.normalizeToolName(toolCall.function.name);
             const toolSignature = `${functionName}:${toolCall.function.arguments}`;
 
             try {
-                console.log(`[Parallel] Executing: ${functionName}`);
+                console.log(`[${analysisId}][Parallel] Executing: ${functionName}`);
 
-                // Skip if already executed (prevent duplicates)
                 if (executedTools.has(toolSignature)) {
-                    console.log(`[Parallel] Skipping duplicate tool: ${functionName}`);
+                    console.log(`[${analysisId}][Parallel] Skipping duplicate tool: ${functionName}`);
                     return {
                         toolCall,
                         result: 'Tool already executed in previous round',
@@ -942,11 +963,7 @@ class LLMAnalyzer {
                 }
 
                 executedTools.add(toolSignature);
-
-                // Parse function arguments
                 const functionArgs = JSON.parse(toolCall.function.arguments);
-
-                // Execute the function
                 const functionResponse = await this.executeFunctionCall(functionName, functionArgs);
 
                 return {
@@ -956,7 +973,7 @@ class LLMAnalyzer {
                 };
 
             } catch (error) {
-                console.error(`[Parallel] Error executing ${functionName}:`, error.message);
+                console.error(`[${analysisId}][Parallel] Error executing ${functionName}:`, error.message);
                 return {
                     toolCall,
                     error: error.message,
@@ -965,10 +982,8 @@ class LLMAnalyzer {
             }
         });
 
-        // Wait for all tools to complete
         const results = await Promise.all(toolPromises);
 
-        // Add all results to message history
         results.forEach(({ toolCall, result, error, skipped }) => {
             const toolResponse = {
                 tool_call_id: toolCall.id,
@@ -984,30 +999,21 @@ class LLMAnalyzer {
             messages.push(toolResponse);
         });
 
-        console.log(`Parallel execution completed - ${results.length} tools processed`);
+        console.log(`[${analysisId}] Parallel execution completed - ${results.length} tools processed`);
     }
 
-    /**
-     * Execute tool calls sequentially
-     *
-     * @private
-     * @param {Array} toolCalls - Tool calls to execute
-     * @param {Array} messages - Message history
-     * @param {Set} executedTools - Set of executed tool signatures
-     */
-    async executeToolCallsSequential(toolCalls, messages, executedTools) {
-        console.log(`Executing ${toolCalls.length} tools sequentially`);
+    async executeToolCallsSequential(toolCalls, messages, executedTools, analysisId) {
+        console.log(`[${analysisId}] Executing ${toolCalls.length} tools sequentially`);
 
         for (const toolCall of toolCalls) {
             const functionName = this.normalizeToolName(toolCall.function.name);
             const toolSignature = `${functionName}:${toolCall.function.arguments}`;
 
             try {
-                console.log(`[Sequential] Executing: ${functionName}`);
+                console.log(`[${analysisId}][Sequential] Executing: ${functionName}`);
 
-                // Skip if already executed
                 if (executedTools.has(toolSignature)) {
-                    console.log(`[Sequential] Skipping duplicate tool: ${functionName}`);
+                    console.log(`[${analysisId}][Sequential] Skipping duplicate tool: ${functionName}`);
 
                     const skipResponse = {
                         tool_call_id: toolCall.id,
@@ -1020,14 +1026,9 @@ class LLMAnalyzer {
                 }
 
                 executedTools.add(toolSignature);
-
-                // Parse function arguments
                 const functionArgs = JSON.parse(toolCall.function.arguments);
-
-                // Execute the function
                 const functionResponse = await this.executeFunctionCall(functionName, functionArgs);
 
-                // Format tool response
                 const toolResponse = {
                     tool_call_id: toolCall.id,
                     role: "tool",
@@ -1040,7 +1041,7 @@ class LLMAnalyzer {
                 messages.push(toolResponse);
 
             } catch (error) {
-                console.error(`[Sequential] Error executing ${functionName}:`, error.message);
+                console.error(`[${analysisId}][Sequential] Error executing ${functionName}:`, error.message);
 
                 const errorResponse = {
                     tool_call_id: toolCall.id,
@@ -1053,44 +1054,26 @@ class LLMAnalyzer {
             }
         }
 
-        console.log(`Sequential execution completed`);
+        console.log(`[${analysisId}] Sequential execution completed`);
     }
 
-    /**
-     * Normalize tool names to handle provider-specific variations
-     *
-     * @private
-     * @param {string} toolName - Original tool name from LLM
-     * @returns {string} Normalized tool name
-     */
     normalizeToolName(toolName) {
-        // Handle Cerebras adding "functions." prefix
         if (toolName.startsWith('functions.')) {
             return toolName.replace('functions.', '');
         }
 
-        // Handle other potential prefixes
         if (toolName.includes('.')) {
             const parts = toolName.split('.');
-            return parts[parts.length - 1]; // Get the last part
+            return parts[parts.length - 1];
         }
 
         return toolName;
     }
 
-    /**
-     * Check if response message contains analysis content
-     *
-     * @private
-     * @param {Object} message - Response message to check
-     * @returns {boolean} Whether message contains analysis content
-     */
     hasAnalysisContent(message) {
         if (!message.content) return false;
 
         const content = message.content.toUpperCase();
-
-        // Look for analysis format indicators
         const indicators = [
             'MALICIOUS:',
             'CONFIDENCE:',
@@ -1098,23 +1081,13 @@ class LLMAnalyzer {
             'ATTACK_TYPE:'
         ];
 
-        // Must have at least 2 indicators to be considered analysis
         const foundIndicators = indicators.filter(indicator => content.includes(indicator));
         return foundIndicators.length >= 2;
     }
 
-    /**
-     * Detect potential tool calling loops
-     *
-     * @private
-     * @param {Array} newToolCalls - New tool calls being requested
-     * @param {Set} executedTools - Previously executed tool signatures
-     * @returns {boolean} Whether a loop is detected
-     */
     detectToolLoop(newToolCalls, executedTools) {
         if (!newToolCalls || newToolCalls.length === 0) return false;
 
-        // Check if all requested tools have already been executed
         const allAlreadyExecuted = newToolCalls.every(toolCall => {
             const functionName = this.normalizeToolName(toolCall.function.name);
             const toolSignature = `${functionName}:${toolCall.function.arguments}`;
@@ -1126,7 +1099,6 @@ class LLMAnalyzer {
             return true;
         }
 
-        // Check for repetitive patterns (same tool called multiple times with same args)
         const currentTools = newToolCalls.map(call => ({
             name: this.normalizeToolName(call.function.name),
             args: call.function.arguments
@@ -1144,18 +1116,9 @@ class LLMAnalyzer {
         return false;
     }
 
-    /**
-     * Force completion with available context when tools fail to conclude
-     *
-     * @private
-     * @param {Array} messages - Complete message history
-     * @param {Set} executedTools - Set of executed tools
-     * @returns {Promise<string>} Forced completion analysis
-     */
-    async forceCompletionWithContext(messages, executedTools) {
-        console.log('Forcing completion with available context');
+    async forceCompletionWithContext(messages, executedTools, analysisId) {
+        console.log(`[${analysisId}] Forcing completion with available context`);
 
-        // Add explicit instruction for final analysis
         const forceMessages = [...messages, {
             role: "user",
             content: `Please provide your final security assessment now based on all the tool results above. Use the required format:
@@ -1172,52 +1135,134 @@ Do not call any more tools - just analyze and respond.`
         }];
 
         try {
-            // Force completion without tools
-            const forcedCompletion = await this.client.chat.completions.create({
-                model: this.getModelName(),
+            const forcedCompletion = await this.secondaryClient.chat.completions.create({
+                model: this.getSecondaryModelName(),
                 messages: forceMessages,
                 temperature: 0.1,
                 max_tokens: 500,
-                // Explicitly disable tools to force text response
                 tool_choice: "none"
             });
 
             if (!forcedCompletion.choices?.[0]?.message?.content) {
-                // Ultimate fallback - create analysis from available data
-                console.warn('Forced completion also failed - creating manual fallback');
+                console.warn(`[${analysisId}] Forced completion also failed - creating manual fallback`);
                 return this.createManualFallback(messages, executedTools);
             }
 
-            console.log('Forced completion successful');
+            console.log(`[${analysisId}] Forced completion successful`);
             return forcedCompletion.choices[0].message.content;
 
         } catch (error) {
-            console.error('Forced completion failed:', error.message);
-            return `Unable to force tools completions`
+            console.error(`[${analysisId}] Forced completion failed:`, error.message);
+            return this.createManualFallback(messages, executedTools);
         }
     }
+
+    createManualFallback(messages, executedTools) {
+        const toolsUsedList = Array.from(executedTools).map(sig => sig.split(':')[0]).join(', ');
+
+        return `MALICIOUS: UNCERTAIN
+CONFIDENCE: 5
+EXPLANATION: Secondary model tool execution incomplete - manual review recommended due to system limitations
+ATTACK_TYPE: UNKNOWN
+TOOLS_USED: ${toolsUsedList || 'NONE'}
+INTELLIGENCE_BOOST: Partial tool data available but incomplete analysis
+PATTERN_DETECTED: System limitation - incomplete tool chain execution`;
+    }
+
     /**
-     * Analyze request using Anthropic's Claude API
-     *
-     * Anthropic Analysis:
-     * - Uses Claude's message-based API format
-     * - No tool calling support (handled differently than OpenAI format)
-     * - Optimized for Claude's reasoning capabilities
+     * Perform the actual LLM analysis without retry logic (from original)
      *
      * @private
-     * @param {string} prompt - Analysis prompt for Claude
-     * @returns {Promise<string>} Analysis response from Claude
+     * @param {Object} logEntry - Request log entry
+     * @param {Object} threatResult - Initial automated threat detection results
+     * @returns {Promise<Object>} Analysis result
      */
-    async analyzeWithAnthropic(prompt) {
-        try {
-            console.log('Making Anthropic Claude API call');
+    async performAnalysis(logEntry, threatResult) {
+        const prompt = this.buildAnalysisPrompt(logEntry, threatResult);
 
-            // Create message using Anthropic's API format
-            const message = await this.client.messages.create({
-                model: this.getModelName(),
-                max_tokens: 500,                        // Sufficient for security analysis
-                temperature: 0.1,                       // Low temperature for consistent analysis
-                system: this.getSystemPrompt(),         // System prompt for security context
+        try {
+            console.log(`Starting LLM analysis for IP ${logEntry.ip}`);
+
+            let response;
+
+            // Route to appropriate provider method
+            switch (this.provider) {
+                case 'openai':
+                case 'groq':
+                case 'cerebras':
+                    response = await this.analyzeWithOpenAIFormat(prompt);
+                    break;
+                case 'anthropic':
+                    response = await this.analyzeWithAnthropic(prompt);
+                    break;
+                default:
+                    throw new Error(`Unsupported provider: ${this.provider}`);
+            }
+
+            // Parse the LLM response into structured format
+            const result = this.parseResponse(response);
+
+            // Validate the parsed result structure
+            if (this.validateAnalysisResult(result)) {
+                console.log(`Analysis completed successfully for IP ${logEntry.ip} (confidence: ${result.confidence})`);
+                return result;
+            } else {
+                throw new Error('Invalid analysis result format returned by LLM');
+            }
+
+        } catch (error) {
+            console.error(`Analysis failed for IP ${logEntry.ip}:`, error.message);
+
+            // Return structured error result instead of throwing
+            return this.createErrorResult('LLM analysis failed', error?.message || 'Unknown error');
+        }
+    }
+
+    /**
+     * Build comprehensive analysis prompt with request details and context (from original)
+     *
+     * @private
+     * @param {Object} logEntry - Request log entry with all details
+     * @param {Object} threatResult - Initial automated threat detection results
+     * @returns {string} Formatted analysis prompt for LLM
+     */
+    buildAnalysisPrompt(logEntry, threatResult) {
+        return `THREAT ASSESSMENT REQUEST
+
+REQUEST DETAILS:
+IP: ${logEntry.ip}
+Method: ${logEntry.method || 'UNKNOWN'}
+URL: ${logEntry.url || 'Not specified'}
+Query: ${logEntry.queryString || 'None'}
+User-Agent: ${logEntry.userAgent || 'None'}
+Status: ${logEntry.status || 'Unknown'}
+System URL: ${threatResult?.is_system_url ? 'YES' : 'NO'}
+
+AUTOMATED DETECTION:
+Threats Found: ${threatResult?.threats ? threatResult.threats.map(t => `${t.type} (${t.confidence})`).join(', ') : 'None'}
+Initial Score: ${threatResult?.confidence || 0}/10
+
+PAYLOAD:
+${logEntry.payload ? JSON.stringify(logEntry.payload, null, 2) : 'No payload'}
+
+ANALYSIS STEPS:
+1. Check for obvious attack patterns (assign 8-10 if found)
+2. If suspicious but unclear, use appropriate tools
+3. Assign final confidence score
+4. Provide assessment in required format
+
+Your confidence score determines blocking (8+ = blocked). Analyze and respond.`;
+    }
+
+    async analyzeWithAnthropic(prompt, analysisId = 'unknown') {
+        try {
+            console.log(`[${analysisId}] Making Anthropic Claude API call`);
+
+            const message = await this.secondaryClient.messages.create({
+                model: this.getSecondaryModelName(),
+                max_tokens: 500,
+                temperature: 0.1,
+                system: this.getSystemPrompt(),
                 messages: [
                     {
                         role: 'user',
@@ -1226,49 +1271,28 @@ Do not call any more tools - just analyze and respond.`
                 ]
             });
 
-            // Validate Anthropic response structure
             if (!message.content || message.content.length === 0) {
                 throw new Error('Empty response from Anthropic API');
             }
 
-            // Extract text content from response
             const responseText = message.content[0]?.text;
 
             if (!responseText) {
                 throw new Error('No text content in Anthropic response');
             }
 
-            console.log('Anthropic analysis completed successfully');
+            console.log(`[${analysisId}] Anthropic analysis completed successfully`);
             return responseText;
 
         } catch (error) {
-            console.error('Error in Anthropic API call:', error.message);
+            console.error(`[${analysisId}] Error in Anthropic API call:`, error.message);
             throw new Error(`Anthropic API error: ${error.message}`);
         }
     }
 
-    /**
-     * Get the comprehensive system prompt for LLM security analysis
-     *
-     * System Prompt Strategy:
-     * - Establishes security expert persona and decision authority
-     * - Defines confidence scoring as primary decision mechanism
-     * - Provides threat categorization framework
-     * - Outlines tool usage strategies
-     * - Specifies response format requirements
-     *
-     * @private
-     * @returns {string} Complete system prompt for security analysis
-     */
-    /**
-     * Get the enhanced system prompt for multi-round tool calling
-     *
-     * @private
-     * @returns {string} Enhanced system prompt
-     */
     getSystemPrompt() {
         return `
-        ## Role Definition
+## Role Definition
 You are a cybersecurity expert with final authority over threat decisions. You analyze requests using a systematic approach and assign confidence scores that determine security actions.
 
 ## Core Decision Framework
@@ -1359,67 +1383,18 @@ storeMonitoringLog(entry, confidence, explanation)
 ### Step 4: Final Decision
 Synthesize all intelligence sources and provide structured assessment.
 
-## Enhanced Few-Shot Examples
-
-**Example 1: Obviously Malicious (No Tools)**
-\`\`\`
-Request: GET /login.php?user=admin' OR 1=1-- HTTP/1.1
-Assessment: Clear SQL injection attempt
-Confidence: 9 (no tools needed)
-Tools Used: NONE - obvious attack pattern
-\`\`\`
-
-**Example 2: Uncertain Case (Use Monitoring + Possible External Check)**
-\`\`\`
-Request: GET /.env HTTP/1.1 from 203.0.113.45
-Assessment: Reconnaissance attempt, needs context
-Confidence: 5 (uncertain - could be legitimate dev or malicious scanning)
-Tools Used: storeMonitoringLog() + checkAbuseIPDB() if external IP reputation matters
-\`\`\`
-
-**Example 3: Obviously Benign (No Tools)**
-\`\`\`
-Request: GET /favicon.ico HTTP/1.1 from 192.168.1.100
-Assessment: Standard browser request from internal IP
-Confidence: 2 (no tools needed)
-Tools Used: NONE - legitimate internal request
-\`\`\`
-
 ## Structured Response Format
 You must respond in this exact format:
 
 \`\`\`
- MALICIOUS: [YES/NO/UNCERTAIN]
-       CONFIDENCE: [1-10]
-       EXPLANATION: [Your reasoning in 2-3 clear sentences, including why tools were/weren't used]
-       ATTACK_TYPE: [Specific threat type or BENIGN]
-       TOOLS_USED: [Functions called during analysis or "NONE - obvious case"]
-       INTELLIGENCE_BOOST: [How external data influenced confidence or "N/A - content-based decision"]
-       PATTERN_DETECTED: [Relevant behavioral patterns identified]
+MALICIOUS: [YES/NO/UNCERTAIN]
+CONFIDENCE: [1-10]
+EXPLANATION: [Your reasoning in 2-3 clear sentences, including why tools were/weren't used]
+ATTACK_TYPE: [Specific threat type or BENIGN]
+TOOLS_USED: [Functions called during analysis or "NONE - obvious case"]
+INTELLIGENCE_BOOST: [How external data influenced confidence or "N/A - content-based decision"]
+PATTERN_DETECTED: [Relevant behavioral patterns identified]
 \`\`\`
-
-## Rate Limit Conservation Rules
-
-### Pre-Tool Checklist
-Before ANY external API call, verify:
-1. ✓ Is this confidence 4-7 (uncertain range)?
-2. ✓ Is this an external IP that could have reputation data?
-3. ✓ Would IP reputation actually change my confidence score?
-4. ✓ Have I exhausted content-based analysis?
-
-### Monitoring Usage (Aggressive Application)
-**Always use monitoring for:**
-- Any confidence 4-7 assessment
-- First-time suspicious but unclear patterns
-- Reconnaissance attempts that could escalate
-- Geographic or timing anomalies
-- Cases where building historical context adds value
-
-**Monitoring provides:**
-- Pattern accumulation over time
-- Repeat offender identification
-- Behavioral trend analysis
-- Local intelligence that often exceeds external reputation data
 
 ## Key Efficiency Principles
 
@@ -1429,97 +1404,26 @@ Before ANY external API call, verify:
 4. **Pattern Recognition**: Let historical data guide future assessments
 5. **Resource Conservation**: Treat external APIs as rate-limited resources
 
-## Self-Consistency Check
-Before finalizing any decision:
-- "Does my confidence score match the evidence?"
-- "Did I use tools appropriately for this uncertainty level?"
-- "Will my decision help build better future intelligence?"
-- "Am I conserving resources while maintaining security?"
-
-## Restrictions and Guidelines
-- **Never** call external APIs for internal IPs
-- **Never** call external APIs for obviously malicious or benign requests
-- **Always** use monitoring for genuine uncertainty (confidence 4-7)
-- **Never** fabricate or assume tool results
-- **Always** explain tool usage decisions in reasoning
-
 Your goal: Maximum threat detection accuracy with intelligent tool usage that builds comprehensive local intelligence while conserving external API resources.
-            ` }
-
-    /**
-     * Build comprehensive analysis prompt with request details and context
-     *
-     * Prompt Construction Strategy:
-     * - Provides complete request context for analysis
-     * - Includes automated detection results
-     * - Structures information for optimal LLM processing
-     * - Guides analysis workflow and decision making
-     *
-     * @private
-     * @param {Object} logEntry - Request log entry with all details
-     * @param {Object} threatResult - Initial automated threat detection results
-     * @returns {string} Formatted analysis prompt for LLM
-     */
-    buildAnalysisPrompt(logEntry, threatResult) {
-        return `THREAT ASSESSMENT REQUEST
-
-REQUEST DETAILS:
-IP: ${logEntry.ip}
-Method: ${logEntry.method || 'UNKNOWN'}
-URL: ${logEntry.url || 'Not specified'}
-Query: ${logEntry.queryString || 'None'}
-User-Agent: ${logEntry.userAgent || 'None'}
-Status: ${logEntry.status || 'Unknown'}
-System URL: ${threatResult?.is_system_url ? 'YES' : 'NO'}
-
-AUTOMATED DETECTION:
-Threats Found: ${threatResult?.threats ? threatResult.threats.map(t => `${t.type} (${t.confidence})`).join(', ') : 'None'}
-Initial Score: ${threatResult?.confidence || 0}/10
-
-PAYLOAD:
-${logEntry.payload ? JSON.stringify(logEntry.payload, null, 2) : 'No payload'}
-
-ANALYSIS STEPS:
-1. Check for obvious attack patterns (assign 8-10 if found)
-2. If suspicious but unclear, use appropriate tools
-3. Assign final confidence score
-4. Provide assessment in required format
-
-Your confidence score determines blocking (8+ = blocked). Analyze and respond.`;
+        `;
     }
 
-    /**
-     * Parse LLM response into structured result with comprehensive error handling
-     *
-     * Parsing Strategy:
-     * - Handles various LLM response formats robustly
-     * - Extracts key fields using pattern matching
-     * - Provides safe defaults for missing data
-     * - Validates all extracted values
-     * - Maintains structured output format
-     *
-     * @private
-     * @param {string} response - Raw LLM response text
-     * @returns {Object} Structured analysis result
-     */
     parseResponse(response) {
-        // Initialize result structure with safe defaults
         const result = {
-            isMalicious: null,                          // Uncertain until parsed
-            confidence: 0,                              // Safe default (no blocking)
-            explanation: '',                            // Will be populated from response
-            attackType: null,                           // No attack type by default
-            shouldBlock: false,                         // Derived from confidence
-            impact: 'UNKNOWN',                          // Impact level assessment
-            requiresManualReview: false,                // Manual review flag
-            is_system_url: false,                       // System URL indicator
-            toolsUsed: [],                              // List of tools called
-            intelligenceBoost: '',                      // External intelligence impact
-            patternDetected: '',                        // Behavioral patterns found
+            isMalicious: null,
+            confidence: 0,
+            explanation: '',
+            attackType: null,
+            shouldBlock: false,
+            impact: 'UNKNOWN',
+            requiresManualReview: false,
+            is_system_url: false,
+            toolsUsed: [],
+            intelligenceBoost: '',
+            patternDetected: '',
         };
 
         try {
-            // Validate response input
             if (!response || typeof response !== 'string') {
                 console.error('Invalid response type received from LLM:', typeof response);
                 result.explanation = 'LLM returned invalid or empty response format';
@@ -1537,22 +1441,18 @@ Your confidence score determines blocking (8+ = blocked). Analyze and respond.`;
 
             console.log('Parsing LLM response (first 200 chars):', responseText.substring(0, 200) + '...');
 
-            // Split response into lines for structured parsing
             const lines = responseText.split('\n')
                 .map(line => line.trim())
                 .filter(line => line.length > 0);
 
-            // Parse each line for key-value pairs
             for (const line of lines) {
                 try {
                     this.parseResponseLine(line, result);
                 } catch (lineError) {
                     console.warn('Error parsing response line:', line, '-', lineError.message);
-                    // Continue parsing other lines even if one fails
                 }
             }
 
-            // Post-processing and validation of parsed result
             this.finalizeParseResult(result, responseText);
 
             console.log('Successfully parsed LLM response:', {
@@ -1566,7 +1466,6 @@ Your confidence score determines blocking (8+ = blocked). Analyze and respond.`;
             console.error('Critical error parsing LLM response:', error.message);
             console.error('Response content:', response);
 
-            // Create error result with diagnostic information
             result.explanation = `Response parsing failed: ${error.message}. Raw response: ${response}`;
             result.requiresManualReview = true;
             result.confidence = 0;
@@ -1575,23 +1474,9 @@ Your confidence score determines blocking (8+ = blocked). Analyze and respond.`;
         return result;
     }
 
-    /**
-     * Parse individual response line for key-value extraction
-     *
-     * Line Parsing Strategy:
-     * - Uses case-insensitive matching for robustness
-     * - Handles various delimiter formats (colon, equals, etc.)
-     * - Validates extracted values before assignment
-     * - Provides specific handling for each expected field type
-     *
-     * @private
-     * @param {string} line - Individual line from LLM response
-     * @param {Object} result - Result object to update with parsed values
-     */
     parseResponseLine(line, result) {
         const upperLine = line.toUpperCase();
 
-        // Parse malicious status
         if (upperLine.startsWith('MALICIOUS:')) {
             const value = line.split(':')[1]?.trim().toUpperCase();
             if (value === 'YES') {
@@ -1603,7 +1488,6 @@ Your confidence score determines blocking (8+ = blocked). Analyze and respond.`;
                 result.requiresManualReview = true;
             }
         }
-        // Parse confidence score
         else if (upperLine.startsWith('CONFIDENCE:')) {
             const confidenceStr = line.split(':')[1]?.trim();
             const confidenceNum = parseInt(confidenceStr);
@@ -1614,118 +1498,102 @@ Your confidence score determines blocking (8+ = blocked). Analyze and respond.`;
                 console.warn(`Invalid confidence value detected: ${confidenceStr}, using default 0`);
             }
         }
-        // Parse explanation
         else if (upperLine.startsWith('EXPLANATION:')) {
             result.explanation = line.split(':').slice(1).join(':').trim();
         }
-        // Parse attack type
         else if (upperLine.startsWith('ATTACK_TYPE:')) {
             const attackType = line.split(':')[1]?.trim();
             result.attackType = (attackType && attackType.toUpperCase() !== 'BENIGN') ? attackType : null;
         }
-        // Parse tools used
         else if (upperLine.startsWith('TOOLS_USED:')) {
             const toolsStr = line.split(':')[1]?.trim();
             if (toolsStr && toolsStr !== 'None' && toolsStr !== 'N/A') {
                 result.toolsUsed = toolsStr.split(',').map(tool => tool.trim());
             }
         }
-        // Parse intelligence boost
         else if (upperLine.startsWith('INTELLIGENCE_BOOST:')) {
             result.intelligenceBoost = line.split(':').slice(1).join(':').trim();
         }
-        // Parse pattern detection
         else if (upperLine.startsWith('PATTERN_DETECTED:')) {
             result.patternDetected = line.split(':').slice(1).join(':').trim();
         }
-        // Parse reasoning effort level (Only applicable for gpt oss)
-        // else if (upperLine.startsWith('REASONING_EFFORT:')) {
-        //     const effort = line.split(':')[1]?.trim().toLowerCase();
-        //     if (['low', 'medium', 'high'].includes(effort)) {
-        //         result.reasoningEffort = effort;
-        //     }
-        // }
-        // Parse system URL indicators
         else if (line.includes('is_system_url: true') || upperLine.includes('SYSTEM URL: YES')) {
             result.is_system_url = true;
         }
     }
 
-    /**
-     * Finalize and validate parsed result with derived properties
-     *
-     * Finalization Process:
-     * - Sets derived properties based on confidence score
-     * - Validates all extracted values
-     * - Provides fallback values for missing critical data
-     * - Ensures result consistency and completeness
-     *
-     * @private
-     * @param {Object} result - Result object to finalize
-     * @param {string} originalResponse - Original LLM response for fallback
-     */
     finalizeParseResult(result, originalResponse) {
-        // Set blocking decision based on confidence threshold
         result.shouldBlock = result.confidence >= this.config.maliciousConfidenceThreshold;
 
-        // Set impact level based on confidence score
         if (result.confidence >= 8) {
-            result.impact = 'HIGH';                     // High confidence threats
+            result.impact = 'HIGH';
         } else if (result.confidence >= 6) {
-            result.impact = 'MEDIUM';                   // Medium confidence threats
+            result.impact = 'MEDIUM';
         } else if (result.confidence >= 4) {
-            result.impact = 'LOW';                      // Low confidence threats
+            result.impact = 'LOW';
         } else {
-            result.impact = 'NONE';                     // Benign traffic
+            result.impact = 'NONE';
         }
 
-        // Set malicious status based on confidence if not explicitly provided
         if (result.isMalicious === null) {
             if (result.confidence >= 8) {
-                result.isMalicious = true;              // High confidence = malicious
+                result.isMalicious = true;
             } else if (result.confidence >= 6) {
-                result.requiresManualReview = true;     // Medium confidence = review needed
+                result.requiresManualReview = true;
             } else {
-                result.isMalicious = false;             // Low confidence = benign
+                result.isMalicious = false;
             }
         }
 
-        // Ensure we have a meaningful explanation
         if (!result.explanation || result.explanation.trim().length === 0) {
             if (originalResponse.length > 0) {
-                // Use truncated original response as explanation
                 result.explanation = `Analysis completed with confidence ${result.confidence}/10. ${originalResponse.substring(0, 200)}`;
             } else {
-                // Generic fallback explanation
                 result.explanation = `Analysis completed with confidence ${result.confidence}/10 - no detailed explanation provided by LLM`;
             }
         }
 
-        // Final confidence score validation
         if (typeof result.confidence !== 'number' || result.confidence < 0 || result.confidence > 10) {
             console.warn(`Invalid confidence score detected during finalization: ${result.confidence}, resetting to 0`);
             result.confidence = 0;
             result.requiresManualReview = true;
-            result.shouldBlock = false;                 // Don't block on invalid scores
+            result.shouldBlock = false;
         }
     }
 
     /**
-     * Test connection to the configured LLM provider
-     *
-     * Connection Test Process:
-     * - Creates minimal test request
-     * - Validates API connectivity and response format
-     * - Tests basic parsing capabilities
-     * - Returns diagnostic information
-     *
-     * @returns {Promise<Object>} Connection test result with success status
+     * Test connection for both primary and secondary models
      */
     async testConnection() {
-        try {
-            console.log(`Testing connection to ${this.provider} provider...`);
+        const results = {
+            primary: { success: false, message: 'Not tested' },
+            secondary: { success: false, message: 'Not tested' },
+            overall: false
+        };
 
-            // Create minimal test case
+        // Test primary model if enabled
+        if (this.options.enablePrimaryModel && this.primaryModel) {
+            try {
+                console.log('Testing primary model connection...');
+                results.primary = await this.primaryModel.testConnection();
+            } catch (error) {
+                results.primary = {
+                    success: false,
+                    message: `Primary model test failed: ${error.message}`,
+                    error: error.message
+                };
+            }
+        } else {
+            results.primary = {
+                success: false,
+                message: 'Primary model disabled or not initialized'
+            };
+        }
+
+        // Test secondary model
+        try {
+            console.log('Testing secondary model connection...');
+
             const testLogEntry = {
                 ip: '127.0.0.1',
                 method: 'GET',
@@ -1741,31 +1609,28 @@ Your confidence score determines blocking (8+ = blocked). Analyze and respond.`;
                 is_system_url: false
             };
 
-            // Build test prompt
-            const testPrompt = this.buildAnalysisPrompt(testLogEntry, testThreatResult);
+            const testPrompt = this.buildSecondaryPrompt(testLogEntry, testThreatResult);
             let response;
 
-            // Execute provider-specific test
             switch (this.provider) {
                 case 'openai':
                 case 'groq':
                 case 'cerebras':
-                    response = await this.analyzeWithOpenAIFormat(testPrompt);
+                    response = await this.analyzeWithOpenAIFormat(testPrompt, 'connection-test');
                     break;
                 case 'anthropic':
-                    response = await this.analyzeWithAnthropic(testPrompt);
+                    response = await this.analyzeWithAnthropic(testPrompt, 'connection-test');
                     break;
                 default:
-                    throw new Error(`Unsupported provider for connection test: ${this.provider}`);
+                    throw new Error(`Unsupported provider: ${this.provider}`);
             }
 
-            // Test response parsing
             const parsedResponse = this.parseResponse(response);
 
-            return {
+            results.secondary = {
                 success: true,
                 message: `${this.provider} connection successful`,
-                model: this.getModelName(),
+                model: this.getSecondaryModelName(),
                 testResponse: {
                     confidence: parsedResponse.confidence,
                     isMalicious: parsedResponse.isMalicious,
@@ -1775,98 +1640,78 @@ Your confidence score determines blocking (8+ = blocked). Analyze and respond.`;
             };
 
         } catch (error) {
-            console.error(`Connection test failed for ${this.provider}:`, error.message);
-
-            return {
+            console.error(`Secondary model connection test failed:`, error.message);
+            results.secondary = {
                 success: false,
                 message: `${this.provider} connection failed: ${error.message}`,
                 error: error.message,
-                model: this.getModelName(),
-                timestamp: new Date().toISOString()
+                model: this.getSecondaryModelName()
             };
         }
-    }
 
-    /**
-     * Clear all caches and reset analyzer state
-     *
-     * Cache Clearing:
-     * - Removes all IP-level cached results
-     * - Clears all request-level cached results
-     * - Resets queue tracking data
-     * - Preserves performance metrics for analysis
-     * - Logs previous statistics before clearing
-     */
-    clearCache() {
-        // Capture current statistics before clearing
-        const stats = this.getCacheStats();
+        // Determine overall success
+        results.overall = results.secondary.success &&
+            (!this.options.enablePrimaryModel || results.primary.success);
 
-        // Clear all cache data structures
-        this.ipCache.clear();
-        this.requestCache.clear();
-        this.ipRequestQueue.clear();
-
-        // Reset metadata but preserve analysis totals for trending
-        this.cacheMetadata = {
-            ...this.cacheMetadata,
-            lastCleanup: Date.now(),
-            cacheHits: 0,
-            cacheMisses: 0
+        return {
+            success: results.overall,
+            message: results.overall ? 'Two-tier system operational' : 'System issues detected',
+            primary: results.primary,
+            secondary: results.secondary,
+            configuration: {
+                primaryEnabled: this.options.enablePrimaryModel,
+                secondaryProvider: this.provider,
+                timestamp: new Date().toISOString()
+            }
         };
-
-        console.log('All caches cleared successfully. Previous statistics:', stats);
     }
 
     /**
-     * Get comprehensive cache and performance statistics
-     *
-     * Statistics Include:
-     * - Current cache sizes and limits
-     * - Performance metrics (hit rates, analysis counts)
-     * - Memory usage estimates
-     * - Maintenance scheduling information
-     *
-     * @returns {Object} Complete cache statistics and performance data
+     * Get comprehensive statistics for the two-tier system
      */
     getCacheStats() {
-        // Calculate cache hit rate percentage
         const hitRate = this.cacheMetadata.totalAnalyzed > 0
             ? (this.cacheMetadata.cacheHits / this.cacheMetadata.totalAnalyzed * 100).toFixed(2)
             : '0.00';
 
         return {
-            // Current cache utilization
+            // Cache statistics
             ipCache: this.ipCache.size,
             requestCache: this.requestCache.size,
             queuedIPs: this.ipRequestQueue.size,
-
-            // Configured limits
             maxIpCache: this.config.maxIpCacheSize,
             maxRequestCache: this.config.maxRequestCacheSize,
-
-            // Performance metrics
             totalAnalyzed: this.cacheMetadata.totalAnalyzed,
             cacheHits: this.cacheMetadata.cacheHits,
             cacheMisses: this.cacheMetadata.cacheMisses,
             hitRate: `${hitRate}%`,
-
-            // Maintenance information
             lastCleanup: new Date(this.cacheMetadata.lastCleanup).toISOString(),
+            estimatedMemoryKB: Math.round((this.ipCache.size + this.requestCache.size) * 0.5),
 
-            // Estimated memory usage (rough calculation)
-            estimatedMemoryKB: Math.round((this.ipCache.size + this.requestCache.size) * 0.5)
+            // Two-tier system statistics
+            tierStats: {
+                totalRequests: this.tierStats.totalRequests,
+                primaryResolved: this.tierStats.primaryResolved,
+                secondaryEscalated: this.tierStats.secondaryEscalated,
+                primaryErrors: this.tierStats.primaryErrors,
+                escalationRate: `${this.tierStats.escalationRate}%`,
+                averagePrimaryTime: Math.round(this.tierStats.averagePrimaryTime),
+                averageSecondaryTime: Math.round(this.tierStats.averageSecondaryTime)
+            },
+
+            // Primary model statistics (if enabled)
+            primaryStats: this.options.enablePrimaryModel && this.primaryModel
+                ? this.primaryModel.getStats()
+                : { message: 'Primary model not enabled or not initialized' }
         };
     }
 
     /**
      * Get list of currently cached malicious IPs with details
-     *
-     * @returns {Array} List of malicious IP entries sorted by confidence
      */
     getMaliciousIPs() {
         const maliciousIPs = [];
 
-        // Extract high-confidence malicious IPs from cache
         for (const [ip, result] of this.ipCache.entries()) {
             if (result.confidence >= this.config.maliciousConfidenceThreshold) {
                 maliciousIPs.push({
@@ -1874,51 +1719,64 @@ Your confidence score determines blocking (8+ = blocked). Analyze and respond.`;
                     confidence: result.confidence,
                     attackType: result.attackType || 'Unknown',
                     explanation: result.explanation.substring(0, 100) + (result.explanation.length > 100 ? '...' : ''),
-                    detectedAt: result.detectedAt || new Date().toISOString()
+                    detectedAt: result.detectedAt || new Date().toISOString(),
+                    tier: result.tier || 'unknown'
                 });
             }
         }
 
-        // Sort by confidence level (highest threats first)
         return maliciousIPs.sort((a, b) => b.confidence - a.confidence);
     }
 
     /**
-     * Get current configuration settings
-     *
-     * @returns {Object} Current analyzer configuration
+     * Get current configuration settings for two-tier system
      */
     getConfiguration() {
         return {
-            provider: this.provider,
-            model: this.getModelName(),
+            // Secondary model configuration
+            secondaryProvider: this.provider,
+            secondaryModel: this.getSecondaryModelName(),
+
+            // Primary model configuration
+            primaryEnabled: this.options.enablePrimaryModel,
+            primaryModel: this.options.primaryModelId,
+            primaryDevice: this.options.primaryDevice,
+
+            // System configuration
             config: { ...this.config },
             cacheEnabled: true,
             toolsEnabled: true,
+
+            // Two-tier specific features
             features: {
+                twoTierAnalysis: true,
+                intelligentEscalation: true,
+                primaryModelFallback: true,
                 sequentialToolExecution: true,
                 noRetryLogic: true,
                 intelligentCaching: true,
                 maliciousIPTracking: true
-            }
+            },
+
+            // Performance settings
+            primaryTimeoutMs: this.config.primaryTimeoutMs,
+            escalationThreshold: this.config.escalationThreshold
         };
     }
 
     /**
      * Update configuration settings with validation
-     *
-     * @param {Object} newConfig - Configuration updates to apply
      */
     updateConfiguration(newConfig) {
-        // Define which configuration keys can be safely updated
         const allowedUpdates = [
             'maxIpCacheSize',
             'maxRequestCacheSize',
             'maliciousConfidenceThreshold',
-            'cacheCleanupInterval'
+            'cacheCleanupInterval',
+            'primaryTimeoutMs',
+            'escalationThreshold'
         ];
 
-        // Apply valid configuration updates
         for (const [key, value] of Object.entries(newConfig)) {
             if (allowedUpdates.includes(key) && typeof value === 'number' && value > 0) {
                 const oldValue = this.config[key];
@@ -1931,21 +1789,44 @@ Your confidence score determines blocking (8+ = blocked). Analyze and respond.`;
     }
 
     /**
-     * Comprehensive health check for the analyzer system
-     *
-     * Health Check Components:
-     * - LLM provider connectivity test
-     * - Cache system status
-     * - Performance metrics analysis
-     * - System resource utilization
-     *
-     * @returns {Promise<Object>} Complete health status report
+     * Clear all caches and reset analyzer state
+     */
+    clearCache() {
+        const stats = this.getCacheStats();
+
+        this.ipCache.clear();
+        this.requestCache.clear();
+        this.ipRequestQueue.clear();
+
+        this.cacheMetadata = {
+            ...this.cacheMetadata,
+            lastCleanup: Date.now(),
+            cacheHits: 0,
+            cacheMisses: 0
+        };
+
+        // Reset tier statistics
+        this.tierStats = {
+            totalRequests: 0,
+            primaryResolved: 0,
+            secondaryEscalated: 0,
+            primaryErrors: 0,
+            averagePrimaryTime: 0,
+            averageSecondaryTime: 0,
+            escalationRate: 0
+        };
+
+        console.log('All caches and tier statistics cleared successfully. Previous statistics:', stats);
+    }
+
+    /**
+     * Comprehensive health check for the two-tier analyzer system
      */
     async healthCheck() {
         const stats = this.getCacheStats();
         const maliciousCount = this.getMaliciousIPs().length;
 
-        // Test LLM connectivity and functionality
+        // Test both tier connections
         let connectionTest;
         try {
             connectionTest = await this.testConnection();
@@ -1953,18 +1834,38 @@ Your confidence score determines blocking (8+ = blocked). Analyze and respond.`;
             connectionTest = {
                 success: false,
                 message: `Health check connection test failed: ${error.message}`,
-                error: error.message
+                error: error.message,
+                primary: { success: false, message: 'Test failed' },
+                secondary: { success: false, message: 'Test failed' }
             };
         }
 
         // Determine overall system health
         const isHealthy = connectionTest.success && stats.totalAnalyzed >= 0;
 
+        // Calculate efficiency metrics
+        const primaryEfficiency = this.tierStats.totalRequests > 0
+            ? ((this.tierStats.primaryResolved / this.tierStats.totalRequests) * 100).toFixed(1)
+            : '0.0';
+
         return {
             status: isHealthy ? 'healthy' : 'unhealthy',
-            provider: this.provider,
-            model: this.getModelName(),
-            connection: connectionTest.success,
+
+            // Model status
+            models: {
+                primary: {
+                    enabled: this.options.enablePrimaryModel,
+                    model: this.options.primaryModelId,
+                    status: connectionTest.primary.success ? 'operational' : 'error',
+                    message: connectionTest.primary.message
+                },
+                secondary: {
+                    provider: this.provider,
+                    model: this.getSecondaryModelName(),
+                    status: connectionTest.secondary.success ? 'operational' : 'error',
+                    message: connectionTest.secondary.message
+                }
+            },
 
             // Cache health metrics
             cache: {
@@ -1974,20 +1875,26 @@ Your confidence score determines blocking (8+ = blocked). Analyze and respond.`;
                 memoryUsage: `${stats.estimatedMemoryKB}KB`
             },
 
-            // Performance metrics
+            // Two-tier performance metrics
             performance: {
                 totalAnalyzed: stats.totalAnalyzed,
-                averageHitRate: stats.hitRate,
-                cacheEfficiency: stats.cacheHits > 0 ? 'good' : 'building'
+                primaryResolution: `${primaryEfficiency}%`,
+                escalationRate: stats.tierStats.escalationRate + '%',
+                averagePrimaryTime: `${stats.tierStats.averagePrimaryTime}ms`,
+                averageSecondaryTime: `${stats.tierStats.averageSecondaryTime}ms`,
+                systemEfficiency: primaryEfficiency > 70 ? 'excellent' : primaryEfficiency > 50 ? 'good' : 'needs improvement'
             },
 
             // System information
             system: {
                 uptime: Date.now() - this.cacheMetadata.lastCleanup,
+                architecture: 'two-tier',
                 features: {
-                    caching: true,
+                    primaryTier: this.options.enablePrimaryModel,
+                    intelligentEscalation: true,
                     toolCalling: true,
-                    maliciousTracking: true
+                    maliciousTracking: true,
+                    caching: true
                 }
             },
 
@@ -1995,6 +1902,158 @@ Your confidence score determines blocking (8+ = blocked). Analyze and respond.`;
             connectionTest: connectionTest.success ? 'passed' : 'failed',
             lastCheck: new Date().toISOString()
         };
+    }
+
+    /**
+     * Get detailed tier performance report
+     */
+    getTierPerformanceReport() {
+        const totalRequests = this.tierStats.totalRequests;
+        const primaryResolved = this.tierStats.primaryResolved;
+        const secondaryEscalated = this.tierStats.secondaryEscalated;
+        const primaryErrors = this.tierStats.primaryErrors;
+
+        return {
+            summary: {
+                totalRequests,
+                primaryResolved,
+                secondaryEscalated,
+                primaryErrors,
+                escalationRate: totalRequests > 0 ? ((secondaryEscalated / totalRequests) * 100).toFixed(1) + '%' : '0.0%',
+                primarySuccessRate: totalRequests > 0 ? ((primaryResolved / totalRequests) * 100).toFixed(1) + '%' : '0.0%',
+                errorRate: totalRequests > 0 ? ((primaryErrors / totalRequests) * 100).toFixed(1) + '%' : '0.0%'
+            },
+
+            performance: {
+                averagePrimaryTime: Math.round(this.tierStats.averagePrimaryTime),
+                averageSecondaryTime: Math.round(this.tierStats.averageSecondaryTime),
+                timeEfficiencyGain: this.tierStats.averageSecondaryTime > 0 && this.tierStats.averagePrimaryTime > 0
+                    ? `${(((this.tierStats.averageSecondaryTime - this.tierStats.averagePrimaryTime) / this.tierStats.averageSecondaryTime) * 100).toFixed(1)}%`
+                    : 'N/A'
+            },
+
+            recommendations: this.generatePerformanceRecommendations(),
+
+            primaryModelStats: this.options.enablePrimaryModel && this.primaryModel
+                ? this.primaryModel.getStats()
+                : null,
+
+            generatedAt: new Date().toISOString()
+        };
+    }
+
+    /**
+     * Generate performance recommendations based on tier statistics
+     */
+    generatePerformanceRecommendations() {
+        const recommendations = [];
+        const escalationRate = parseFloat(this.tierStats.escalationRate);
+        const errorRate = this.tierStats.totalRequests > 0
+            ? (this.tierStats.primaryErrors / this.tierStats.totalRequests) * 100
+            : 0;
+
+        if (escalationRate > 30) {
+            recommendations.push({
+                type: 'optimization',
+                priority: 'medium',
+                message: `High escalation rate (${escalationRate.toFixed(1)}%) - consider tuning primary model or improving training data`
+            });
+        }
+
+        if (escalationRate < 10) {
+            recommendations.push({
+                type: 'efficiency',
+                priority: 'low',
+                message: `Excellent escalation rate (${escalationRate.toFixed(1)}%) - primary model performing well`
+            });
+        }
+
+        if (errorRate > 5) {
+            recommendations.push({
+                type: 'stability',
+                priority: 'high',
+                message: `Primary model error rate is high (${errorRate.toFixed(1)}%) - investigate primary model stability`
+            });
+        }
+
+        if (this.tierStats.averagePrimaryTime > 3000) {
+            recommendations.push({
+                type: 'performance',
+                priority: 'medium',
+                message: `Primary model response time is slow (${this.tierStats.averagePrimaryTime.toFixed(0)}ms) - consider optimization`
+            });
+        }
+
+        if (recommendations.length === 0) {
+            recommendations.push({
+                type: 'status',
+                priority: 'info',
+                message: 'Two-tier system performing within expected parameters'
+            });
+        }
+
+        return recommendations;
+    }
+
+    /**
+     * Force escalation to secondary model (for testing/debugging)
+     */
+    async forceSecondaryAnalysis(logEntry, threatResult) {
+        console.log(`[FORCE-SECONDARY] Forcing analysis to secondary tier for IP: ${logEntry.ip}`);
+
+        const analysisId = `force-${logEntry.ip}-${Date.now()}`;
+        return await this.performSecondaryAnalysis(logEntry, threatResult, analysisId);
+    }
+
+    /**
+     * Initialize primary model manually (if auto-initialization failed)
+     */
+    async initializePrimaryModel() {
+        if (!this.options.enablePrimaryModel) {
+            throw new Error('Primary model is disabled in configuration');
+        }
+
+        if (!this.primaryModel) {
+            this.primaryModel = new TransformersLLM();
+        }
+
+        if (!this.primaryModel.isInitialized) {
+            console.log('Manually initializing primary model...');
+            await this.primaryModel.initialize();
+            console.log('Primary model manual initialization completed');
+        } else {
+            console.log('Primary model already initialized');
+        }
+
+        return this.primaryModel.getStats();
+    }
+
+    /**
+     * Dispose of resources for both models
+     */
+    async dispose() {
+        console.log('Disposing two-tier LLMAnalyzer resources...');
+
+        try {
+            // Dispose primary model if it exists
+            if (this.primaryModel) {
+                await this.primaryModel.dispose();
+                console.log('Primary model disposed');
+            }
+
+            // Clear all caches
+            this.clearCache();
+
+            // Clear intervals
+            if (this.cacheMaintenanceInterval ) {
+                clearInterval(this.cacheMaintenanceInterval);
+            }
+
+            console.log('Two-tier LLMAnalyzer disposed successfully');
+
+        } catch (error) {
+            console.warn('Error during disposal:', error.message);
+        }
     }
 }
 
