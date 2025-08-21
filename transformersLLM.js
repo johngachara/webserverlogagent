@@ -14,7 +14,7 @@ class TransformersLLM {
     constructor(options = {}) {
         // Ollama configuration
         this.ollamaHost = options.ollamaHost || 'http://localhost:11434';
-        this.modelName = options.modelName || 'gemma2:2b';
+        this.modelName = options.modelName || 'llama3.2:3b';
         this.temperature = options.temperature || 0.1;
         this.maxTokens = options.maxTokens || 50;
 
