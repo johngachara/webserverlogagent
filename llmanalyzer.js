@@ -67,10 +67,7 @@ class LLMAnalyzer {
         this.primaryModel = null;
         if (this.options.enablePrimaryModel) {
             try {
-                this.primaryModel = new TransformersLLM({
-                    modelId: this.options.primaryModelId,
-                    device: this.options.primaryDevice
-                });
+                this.primaryModel = new TransformersLLM();
                 console.log(`Primary model configured: ${this.options.primaryModelId}`);
             } catch (error) {
                 console.warn('Primary model initialization failed, continuing with secondary only:', error.message);
@@ -91,7 +88,7 @@ class LLMAnalyzer {
             maliciousConfidenceThreshold: 8,
 
             // Two-tier system settings
-            primaryTimeoutMs: 30000,                 // Primary model timeout
+            primaryTimeoutMs: 60000,                 // Primary model timeout
             maxPrimaryRetries: 1,                   // Primary model retry attempts
             escalationThreshold: 5,                 // Confidence level that triggers escalation
 

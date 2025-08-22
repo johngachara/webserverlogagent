@@ -1,22 +1,30 @@
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { cpus } from 'os';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /**
- * TransformersLLM - Ollama-powered Primary Security Analyzer
- *
- * Uses Ollama for reliable local LLM inference without native compilation issues.
- * Much more stable than node-llama-cpp and easier to set up.
+ * TransformersLLM - Optimized Ollama-powered Security Analyzer
+ * Optimized for CPU performance and better response generation
  */
 class TransformersLLM {
     constructor(options = {}) {
-        // Ollama configuration
+        // Ollama configuration - optimized for CPU
         this.ollamaHost = options.ollamaHost || 'http://localhost:11434';
-        this.modelName = options.modelName || 'llama3.2:3b';
-        this.temperature = options.temperature || 0.1;
-        this.maxTokens = options.maxTokens || 50;
+
+        // Use phi3:3.8b for better reasoning while still CPU-friendly
+        this.modelName = options.modelName || 'phi3.5:3.8b';
+
+        // Optimized parameters for CPU performance with explanation support
+        this.temperature = options.temperature || 0.1; // Lower for consistent responses
+        this.maxTokens = options.maxTokens || 80; // Increased for confidence + explanation
+        this.numCtx = options.numCtx || 2048; // Slightly larger context for better understanding
+
+        // CPU optimization settings - ES module compatible
+        this.numThread = options.numThread || this.getOptimalThreadCount();
+        this.numGpu = 0; // Force CPU-only
 
         // Runtime state
         this.isInitialized = false;
@@ -33,9 +41,50 @@ class TransformersLLM {
             initializationTime: null
         };
 
-        console.log(`TransformersLLM initializing with Ollama`);
+        console.log(`TransformersLLM initializing with optimized CPU settings`);
         console.log(`Ollama host: ${this.ollamaHost}`);
-        console.log(`Model: ${this.modelName}`);
+        console.log(`Model: ${this.modelName} (CPU optimized)`);
+        console.log(`CPU threads: ${this.numThread}`);
+    }
+
+    /**
+     * Calculate optimal thread count for CPU inference
+     * Uses multiple strategies for better performance detection
+     */
+    getOptimalThreadCount() {
+        try {
+            const cpuCount = cpus().length;
+
+            // Strategy 1: Use half of available cores (leave room for OS and other processes)
+            const halfCores = Math.max(1, Math.floor(cpuCount / 2));
+
+            // Strategy 2: Optimize based on CPU count ranges
+            let optimalThreads;
+
+            if (cpuCount <= 2) {
+                // Low-end systems: use 1 thread to avoid overwhelming
+                optimalThreads = 1;
+            } else if (cpuCount <= 4) {
+                // Quad-core: use 2 threads for good balance
+                optimalThreads = 2;
+            } else if (cpuCount <= 8) {
+                // 6-8 core systems: use 3-4 threads
+                optimalThreads = Math.min(4, halfCores);
+            } else if (cpuCount <= 16) {
+                // High-end consumer: use up to 6 threads
+                optimalThreads = Math.min(6, halfCores);
+            } else {
+                // Server/workstation: use up to 8 threads (diminishing returns beyond this)
+                optimalThreads = Math.min(8, halfCores);
+            }
+
+            console.log(`CPU detection: ${cpuCount} cores detected, using ${optimalThreads} threads for inference`);
+            return optimalThreads;
+
+        } catch (error) {
+            console.warn('Could not detect CPU count, defaulting to 2 threads:', error.message);
+            return 2; // Safe default
+        }
     }
 
     /**
@@ -191,7 +240,7 @@ class TransformersLLM {
         try {
             console.log('Validating model with test prompt...');
 
-            const testResult = await this.generateResponse("Test", { maxTokens: 50 });
+            const testResult = await this.generateResponse("Classify: GET /home\nBENIGN CONFIDENCE 8 Normal homepage request", { maxTokens: 50 });
 
             if (testResult && testResult.trim().length > 0) {
                 console.log('✓ Model validation successful');
@@ -206,7 +255,7 @@ class TransformersLLM {
     }
 
     /**
-     * Generate response using Ollama API
+     * Generate response using Ollama API with CPU optimizations
      */
     async generateResponse(prompt, options = {}) {
         try {
@@ -215,11 +264,20 @@ class TransformersLLM {
                 prompt: prompt,
                 stream: false,
                 options: {
+                    // CPU performance optimizations
                     temperature: options.temperature || this.temperature,
                     num_predict: options.maxTokens || this.maxTokens,
-                    stop: options.stop || ['\n', '.', '!', '?'],
-                    top_p: options.topP || 0.9,
-                    top_k: options.topK || 40
+                    num_ctx: this.numCtx,
+                    num_thread: this.numThread,
+                    num_gpu: this.numGpu,
+
+                    // Sampling optimizations for speed and consistency
+                    top_p: 0.7, // Focused sampling
+                    top_k: 15,  // Lower for speed
+                    repeat_penalty: 1.05, // Prevent repetition
+
+                    // Stop tokens to prevent over-generation
+                    stop: ["\n\n", "Request:", "Classify:"]
                 }
             };
 
@@ -229,8 +287,8 @@ class TransformersLLM {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify(requestBody),
-                // Add timeout for fast responses
-                signal: AbortSignal.timeout(30000) // 30 second timeout
+                // Timeout for CPU performance
+                signal: AbortSignal.timeout(25000) // 25 second timeout for phi3
             });
 
             if (!response.ok) {
@@ -247,23 +305,31 @@ class TransformersLLM {
 
         } catch (error) {
             if (error.name === 'TimeoutError') {
-                throw new Error('Model response timeout (30s)');
+                throw new Error('Model response timeout (25s)');
             }
             throw error;
         }
     }
 
+    /**
+     * Optimized prompt for structured responses with confidence and explanation
+     */
     buildPrompt(logEntry) {
-        return `
-IP: ${logEntry.ip || 'unknown'}
-Method: ${logEntry.method || 'unknown'}
-URL: ${logEntry.url || 'unknown'}
-Query: ${logEntry.queryString || 'none'}
-User-Agent: ${logEntry.userAgent || 'unknown'}
-Respond with either 'MALICIOUS' or 'BENIGN' or 'UNCERTAIN'.
+        // Clear, structured prompt that guides the model to the exact format we want
+        return `Classify this single request as MALICIOUS, BENIGN, or UNCERTAIN.
+If MALICIOUS or BENIGN, include CONFIDENCE (0-10) and one short sentence explanation.
+If UNCERTAIN, do not include a confidence score.
 
-`}
+Request: ${logEntry.method || 'GET'} ${logEntry.url || '/'} from ${logEntry.ip || 'unknown'}${logEntry.queryString ? '?' + logEntry.queryString : ''}
+User-Agent: ${(logEntry.userAgent || 'unknown').substring(0, 50)}
 
+Response format:
+BENIGN CONFIDENCE 8 Normal homepage request
+MALICIOUS CONFIDENCE 9 SQL injection attempt detected
+UNCERTAIN Ambiguous request pattern
+
+Classification:`;
+    }
 
     async analyze(logEntry) {
         if (!this.isInitialized) {
@@ -278,9 +344,8 @@ Respond with either 'MALICIOUS' or 'BENIGN' or 'UNCERTAIN'.
             const prompt = this.buildPrompt(logEntry);
 
             const result = await this.generateResponse(prompt, {
-                maxTokens: 50,
-                temperature: 0.1,
-                stop: ['\n', ' ', '.', '!', '?']
+                maxTokens: this.maxTokens,
+                temperature: 0.1
             });
 
             if (!result || result.trim().length === 0) {
@@ -288,7 +353,7 @@ Respond with either 'MALICIOUS' or 'BENIGN' or 'UNCERTAIN'.
             }
 
             const responseTime = Date.now() - startTime;
-            const rawResponse = result.trim().toUpperCase();
+            const rawResponse = result.trim();
 
             console.log(`[PRIMARY] Raw response: "${rawResponse}" (${responseTime}ms)`);
 
@@ -313,32 +378,94 @@ Respond with either 'MALICIOUS' or 'BENIGN' or 'UNCERTAIN'.
     }
 
     parseResponse(rawResponse, responseTime) {
-        console.log(rawResponse)
-        const cleanResponse = rawResponse
-            .replace(/[^\w\s]/g, '')
-            .split(/\s+/)[0]
-            .toUpperCase();
+        console.log(`[PRIMARY] Full response: "${rawResponse}"`);
 
-        console.log(`[PRIMARY] Parsed decision word: "${cleanResponse}"`);
+        const response = rawResponse.trim();
+        let decision, confidence = 0, explanation = '', requiresSecondaryAnalysis = false;
 
-        let decision, confidence, explanation, requiresSecondaryAnalysis;
+        // Parse structured response format
+        const upperResponse = response.toUpperCase();
 
-        if (cleanResponse === 'MALICIOUS') {
+        if (upperResponse.startsWith('MALICIOUS')) {
             decision = 'MALICIOUS';
-            confidence = 9;
-            explanation = 'Primary model identified obvious malicious patterns';
             requiresSecondaryAnalysis = false;
-        } else if (cleanResponse === 'BENIGN') {
+
+            // Extract confidence and explanation
+            const confidenceMatch = response.match(/CONFIDENCE\s+(\d+)/i);
+            if (confidenceMatch) {
+                confidence = Math.min(10, Math.max(0, parseInt(confidenceMatch[1])));
+                // Extract explanation after confidence number
+                const explanationMatch = response.match(/CONFIDENCE\s+\d+\s+(.+)/i);
+                if (explanationMatch) {
+                    explanation = explanationMatch[1].trim().substring(0, 120); // Limit explanation length
+                } else {
+                    explanation = 'Malicious request detected';
+                }
+            } else {
+                confidence = 7; // Default confidence
+                explanation = response.replace(/MALICIOUS/i, '').trim() || 'Malicious request detected';
+            }
+
+        } else if (upperResponse.startsWith('BENIGN')) {
             decision = 'BENIGN';
-            confidence = 2;
-            explanation = 'Primary model identified request as benign';
             requiresSecondaryAnalysis = false;
-        } else {
+
+            // Extract confidence and explanation
+            const confidenceMatch = response.match(/CONFIDENCE\s+(\d+)/i);
+            if (confidenceMatch) {
+                confidence = Math.min(10, Math.max(0, parseInt(confidenceMatch[1])));
+                // Extract explanation after confidence number
+                const explanationMatch = response.match(/CONFIDENCE\s+\d+\s+(.+)/i);
+                if (explanationMatch) {
+                    explanation = explanationMatch[1].trim().substring(0, 120);
+                } else {
+                    explanation = 'Benign request identified';
+                }
+            } else {
+                confidence = 7; // Default confidence
+                explanation = response.replace(/BENIGN/i, '').trim() || 'Benign request identified';
+            }
+
+        } else if (upperResponse.startsWith('UNCERTAIN')) {
             decision = 'UNCERTAIN';
-            confidence = 5;
-            explanation = 'Primary model uncertain - escalating to advanced analysis';
+            confidence = 5; // Set moderate confidence for uncertain cases
             requiresSecondaryAnalysis = true;
+
+            // Extract explanation (no confidence expected for uncertain)
+            explanation = response.replace(/UNCERTAIN/i, '').trim() || 'Uncertain request pattern';
+            if (explanation.length > 120) {
+                explanation = explanation.substring(0, 120);
+            }
+
+        } else {
+            // Fallback parsing - look for keywords anywhere in response
+            if (upperResponse.includes('MALICIOUS')) {
+                decision = 'MALICIOUS';
+                confidence = 6;
+                explanation = 'Malicious indicators found';
+                requiresSecondaryAnalysis = false;
+            } else if (upperResponse.includes('BENIGN')) {
+                decision = 'BENIGN';
+                confidence = 6;
+                explanation = 'Benign patterns detected';
+                requiresSecondaryAnalysis = false;
+            } else {
+                decision = 'UNCERTAIN';
+                confidence = 3;
+                explanation = 'Unclear response format - escalating';
+                requiresSecondaryAnalysis = true;
+            }
         }
+
+        // Clean up explanation
+        explanation = explanation.replace(/^\W+|\W+$/g, ''); // Remove leading/trailing punctuation
+        if (!explanation || explanation.length < 5) {
+            explanation = decision === 'MALICIOUS' ? 'Threat detected' :
+                decision === 'BENIGN' ? 'Normal request' :
+                    'Needs further analysis';
+        }
+
+        console.log(`[PRIMARY] Parsed - Decision: "${decision}", Confidence: ${confidence}, Explanation: "${explanation}"`);
 
         return {
             decision,
@@ -349,7 +476,7 @@ Respond with either 'MALICIOUS' or 'BENIGN' or 'UNCERTAIN'.
             model: 'ollama',
             modelName: this.modelName,
             responseTime,
-            rawResponse: rawResponse.substring(0, 100),
+            rawResponse: rawResponse.substring(0, 200),
             timestamp: new Date().toISOString()
         };
     }
@@ -387,14 +514,21 @@ Respond with either 'MALICIOUS' or 'BENIGN' or 'UNCERTAIN'.
 
             return {
                 success: true,
-                message: 'Primary model connection successful',
+                message: 'Optimized primary model connection successful',
                 model: 'ollama',
                 modelName: this.modelName,
                 ollamaHost: this.ollamaHost,
+                optimizations: {
+                    cpuThreads: this.numThread,
+                    contextSize: this.numCtx,
+                    maxTokens: this.maxTokens,
+                    gpuDisabled: true
+                },
                 testTime,
                 testResult: {
                     decision: testResult.decision,
                     confidence: testResult.confidence,
+                    explanation: testResult.explanation,
                     responseTime: testResult.responseTime
                 },
                 stats: this.getStats()
@@ -415,8 +549,14 @@ Respond with either 'MALICIOUS' or 'BENIGN' or 'UNCERTAIN'.
                     steps: [
                         '1. Install Ollama: curl -fsSL https://ollama.ai/install.sh | sh',
                         '2. Start Ollama: ollama serve',
-                        '3. Pull model: ollama pull llama3.2:1b',
+                        '3. Pull model: ollama pull phi3:3.8b',
                         '4. Verify: ollama list'
+                    ],
+                    cpuOptimizations: [
+                        'Using phi3:3.8b for better reasoning',
+                        `CPU threads: ${this.numThread}`,
+                        `Context window: ${this.numCtx}`,
+                        'GPU disabled for CPU-only inference'
                     ],
                     ollamaStatus: this.ollamaAvailable ? 'Available' : 'Not accessible',
                     modelStatus: this.modelReady ? 'Ready' : 'Not available'
@@ -431,6 +571,12 @@ Respond with either 'MALICIOUS' or 'BENIGN' or 'UNCERTAIN'.
             model: 'ollama',
             modelName: this.modelName,
             ollamaHost: this.ollamaHost,
+            optimizations: {
+                cpuThreads: this.numThread,
+                contextSize: this.numCtx,
+                maxTokens: this.maxTokens,
+                modelSize: '3.8B parameters (CPU optimized)'
+            },
             initialized: this.isInitialized,
             ollamaAvailable: this.ollamaAvailable,
             modelReady: this.modelReady,
@@ -466,6 +612,12 @@ Respond with either 'MALICIOUS' or 'BENIGN' or 'UNCERTAIN'.
             model: 'ollama',
             modelName: this.modelName,
             ollamaHost: this.ollamaHost,
+            optimizations: {
+                cpuThreads: this.numThread,
+                contextSize: this.numCtx,
+                maxTokens: this.maxTokens,
+                modelSize: '3.8B parameters'
+            },
             initialized: this.isInitialized,
             ollamaAvailable: this.ollamaAvailable,
             modelReady: this.modelReady
