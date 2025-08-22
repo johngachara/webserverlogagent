@@ -14,8 +14,8 @@ class TransformersLLM {
         // Ollama configuration - optimized for CPU
         this.ollamaHost = options.ollamaHost || 'http://localhost:11434';
 
-        // Use phi3:3.8b for better reasoning while still CPU-friendly
-        this.modelName = options.modelName || 'huihui_ai/Hermes-3-Llama-3.2-abliterated:3b';
+        // Use smollm for better reasoning while still CPU-friendly
+        this.modelName = options.modelName || 'llama3.2:1b';
 
         // Optimized parameters for CPU performance with explanation support
         this.temperature = options.temperature || 0.1; // Lower for consistent responses
@@ -335,13 +335,12 @@ class TransformersLLM {
      */
     buildPrompt(logEntry) {
         // Much simpler and clearer prompt for small models
-        const request = `METHOD: ${logEntry.method || 'GET'} URL:${logEntry.url || '/'} QUERY: ${logEntry.queryString || 'NONE'} PAYLOAD : ${logEntry.payload ? JSON.stringify(logEntry.payload, null, 2) : 'No payload'}
+        const request = `METHOD: ${logEntry.method || 'GET'} URL:${logEntry.url || '/'} QUERY: ${logEntry.queryString || 'NONE'}
 `;
         const ip = logEntry.ip || 'unknown';
         const userAgent = (logEntry.userAgent || 'unknown')
 
         return `Task: Analyze this web request for security threats.
-
 Request: ${request}
 From IP: ${ip}
 User-Agent: ${userAgent}
