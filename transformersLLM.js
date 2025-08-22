@@ -15,11 +15,11 @@ class TransformersLLM {
         this.ollamaHost = options.ollamaHost || 'http://localhost:11434';
 
         // Use phi3:3.8b for better reasoning while still CPU-friendly
-        this.modelName = options.modelName || 'phi3.5:3.8b';
+        this.modelName = options.modelName || 'huihui_ai/Hermes-3-Llama-3.2-abliterated:3b';
 
         // Optimized parameters for CPU performance with explanation support
         this.temperature = options.temperature || 0.1; // Lower for consistent responses
-        this.maxTokens = options.maxTokens || 80; // Increased for confidence + explanation
+        this.maxTokens = options.maxTokens || 150; // Increased to ensure complete responses
         this.numCtx = options.numCtx || 2048; // Slightly larger context for better understanding
 
         // CPU optimization settings - ES module compatible
@@ -45,6 +45,7 @@ class TransformersLLM {
         console.log(`Ollama host: ${this.ollamaHost}`);
         console.log(`Model: ${this.modelName} (CPU optimized)`);
         console.log(`CPU threads: ${this.numThread}`);
+        console.log(`Max tokens increased to: ${this.maxTokens}`);
     }
 
     /**
@@ -238,13 +239,24 @@ class TransformersLLM {
 
     async validateModel() {
         try {
-            console.log('Validating model with test prompt...');
+            console.log('Validating model with test JSON prompt...');
 
-            const testResult = await this.generateResponse("Classify: GET /home\nBENIGN CONFIDENCE 8 Normal homepage request", { maxTokens: 50 });
+            const testResult = await this.generateResponse('Task: Is GET /home safe?\n\nRespond with ONLY this JSON format:\n{\n  "result": "SAFE",\n  "confidence": 8,\n  "reason": "Normal homepage request"\n}\n\nJSON:', { maxTokens: 80 });
 
             if (testResult && testResult.trim().length > 0) {
                 console.log('✓ Model validation successful');
                 console.log('Test response:', testResult.trim());
+
+                // Try to parse the test response
+                try {
+                    const jsonMatch = testResult.match(/\{[\s\S]*\}/);
+                    if (jsonMatch) {
+                        const parsed = JSON.parse(jsonMatch[0]);
+                        console.log('✓ JSON parsing validation successful:', parsed);
+                    }
+                } catch (parseError) {
+                    console.warn('⚠ JSON parsing validation failed:', parseError.message);
+                }
             } else {
                 console.warn('Model validation produced empty response');
             }
@@ -256,30 +268,33 @@ class TransformersLLM {
 
     /**
      * Generate response using Ollama API with CPU optimizations
+     * Enhanced to ensure complete response generation
      */
     async generateResponse(prompt, options = {}) {
         try {
             const requestBody = {
                 model: this.modelName,
                 prompt: prompt,
-                stream: false,
+                stream: false, // Important: non-streaming for complete responses
                 options: {
                     // CPU performance optimizations
                     temperature: options.temperature || this.temperature,
-                    num_predict: options.maxTokens || this.maxTokens,
+                    num_predict: options.maxTokens || this.maxTokens, // Increased limit
                     num_ctx: this.numCtx,
                     num_thread: this.numThread,
                     num_gpu: this.numGpu,
 
                     // Sampling optimizations for speed and consistency
-                    top_p: 0.7, // Focused sampling
-                    top_k: 15,  // Lower for speed
-                    repeat_penalty: 1.05, // Prevent repetition
+                    top_p: 0.9, // Slightly higher for more complete responses
+                    top_k: 20,  // Increased for better variety
+                    repeat_penalty: 1.1, // Prevent repetition
 
-                    // Stop tokens to prevent over-generation
-                    stop: ["\n\n", "Request:", "Classify:"]
+                    // Remove aggressive stop tokens to allow complete responses
+                    stop: ["<END>", "---", "\n\n\n"] // Only use clear end markers, allow some newlines for JSON
                 }
             };
+
+            console.log(`[GENERATE] Sending prompt (${prompt.length} chars) with max_tokens: ${requestBody.options.num_predict}`);
 
             const response = await fetch(`${this.ollamaHost}/api/generate`, {
                 method: 'POST',
@@ -287,8 +302,8 @@ class TransformersLLM {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify(requestBody),
-                // Timeout for CPU performance
-                signal: AbortSignal.timeout(25000) // 25 second timeout for phi3
+                // Extended timeout for complete response generation
+                signal: AbortSignal.timeout(35000) // 35 second timeout
             });
 
             if (!response.ok) {
@@ -301,34 +316,44 @@ class TransformersLLM {
                 throw new Error(`Ollama error: ${data.error}`);
             }
 
-            return data.response || '';
+            const generatedResponse = data.response || '';
+            console.log(`[GENERATE] Received response (${generatedResponse.length} chars): "${generatedResponse.substring(0, 100)}${generatedResponse.length > 100 ? '...' : ''}"`);
+
+            return generatedResponse;
 
         } catch (error) {
             if (error.name === 'TimeoutError') {
-                throw new Error('Model response timeout (25s)');
+                throw new Error('Model response timeout (35s) - response may be incomplete');
             }
             throw error;
         }
     }
 
     /**
-     * Optimized prompt for structured responses with confidence and explanation
+     * Simplified, clear prompt for small model with JSON format
+     * Focused on getting complete structured responses
      */
     buildPrompt(logEntry) {
-        // Clear, structured prompt that guides the model to the exact format we want
-        return `Classify this single request as MALICIOUS, BENIGN, or UNCERTAIN.
-If MALICIOUS or BENIGN, include CONFIDENCE (0-10) and one short sentence explanation.
-If UNCERTAIN, do not include a confidence score.
+        // Much simpler and clearer prompt for small models
+        const request = `METHOD: ${logEntry.method || 'GET'} URL:${logEntry.url || '/'} QUERY: ${logEntry.queryString || 'NONE'} PAYLOAD : ${logEntry.payload ? JSON.stringify(logEntry.payload, null, 2) : 'No payload'}
+`;
+        const ip = logEntry.ip || 'unknown';
+        const userAgent = (logEntry.userAgent || 'unknown')
 
-Request: ${logEntry.method || 'GET'} ${logEntry.url || '/'} from ${logEntry.ip || 'unknown'}${logEntry.queryString ? '?' + logEntry.queryString : ''}
-User-Agent: ${(logEntry.userAgent || 'unknown').substring(0, 50)}
+        return `Task: Analyze this web request for security threats.
 
-Response format:
-BENIGN CONFIDENCE 8 Normal homepage request
-MALICIOUS CONFIDENCE 9 SQL injection attempt detected
-UNCERTAIN Ambiguous request pattern
+Request: ${request}
+From IP: ${ip}
+User-Agent: ${userAgent}
 
-Classification:`;
+Respond with ONLY this JSON format (no other text):
+{
+  "result": "SAFE or THREAT or UNKNOWN",
+  "confidence": 1-10,
+  "reason": "one sentence explanation"
+}
+
+JSON:`;
     }
 
     async analyze(logEntry) {
@@ -339,9 +364,10 @@ Classification:`;
         const startTime = Date.now();
 
         try {
-            console.log(`[PRIMARY] Analyzing request from IP: ${logEntry.ip}`);
+            console.log(`[PRIMARY] Analyzing request: ${logEntry.method || 'GET'} ${logEntry.url || '/'} from IP: ${logEntry.ip}`);
 
             const prompt = this.buildPrompt(logEntry);
+            console.log(`[PRIMARY] Using prompt: ${prompt.substring(0, 200)}...`);
 
             const result = await this.generateResponse(prompt, {
                 maxTokens: this.maxTokens,
@@ -355,7 +381,7 @@ Classification:`;
             const responseTime = Date.now() - startTime;
             const rawResponse = result.trim();
 
-            console.log(`[PRIMARY] Raw response: "${rawResponse}" (${responseTime}ms)`);
+            console.log(`[PRIMARY] Full raw response (${rawResponse.length} chars): "${rawResponse}"`);
 
             const analysisResult = this.parseResponse(rawResponse, responseTime);
             this.updateStats(analysisResult, responseTime);
@@ -378,94 +404,133 @@ Classification:`;
     }
 
     parseResponse(rawResponse, responseTime) {
-        console.log(`[PRIMARY] Full response: "${rawResponse}"`);
+        console.log(`[PRIMARY] Parsing JSON response: "${rawResponse}"`);
 
-        const response = rawResponse.trim();
-        let decision, confidence = 0, explanation = '', requiresSecondaryAnalysis = false;
+        let decision = 'UNCERTAIN';
+        let confidence = 5;
+        let explanation = 'Could not parse response';
+        let requiresSecondaryAnalysis = true;
+        let parseMethod = 'json'; // Track how we parsed the response
 
-        // Parse structured response format
-        const upperResponse = response.toUpperCase();
+        try {
+            // First, try to extract JSON from the response
+            let jsonStr = rawResponse.trim();
 
-        if (upperResponse.startsWith('MALICIOUS')) {
-            decision = 'MALICIOUS';
-            requiresSecondaryAnalysis = false;
+            // Look for JSON object in the response
+            const jsonMatch = jsonStr.match(/\{[\s\S]*?\}/);
+            if (jsonMatch) {
+                jsonStr = jsonMatch[0];
+            }
 
-            // Extract confidence and explanation
-            const confidenceMatch = response.match(/CONFIDENCE\s+(\d+)/i);
-            if (confidenceMatch) {
-                confidence = Math.min(10, Math.max(0, parseInt(confidenceMatch[1])));
-                // Extract explanation after confidence number
-                const explanationMatch = response.match(/CONFIDENCE\s+\d+\s+(.+)/i);
-                if (explanationMatch) {
-                    explanation = explanationMatch[1].trim().substring(0, 120); // Limit explanation length
-                } else {
-                    explanation = 'Malicious request detected';
+            console.log(`[PRIMARY] Extracted JSON string: "${jsonStr}"`);
+
+            // Parse the JSON
+            let parsedData;
+            try {
+                parsedData = JSON.parse(jsonStr);
+                console.log(`[PRIMARY] Successfully parsed JSON:`, parsedData);
+            } catch (jsonError) {
+                console.log(`[PRIMARY] JSON parse failed, attempting to fix common issues...`);
+
+                // Try to fix common JSON issues
+                let fixedJson = jsonStr
+                    .replace(/'/g, '"')  // Replace single quotes with double quotes
+                    .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":') // Add quotes to unquoted keys
+                    .replace(/:\s*([^",\{\[\d\s][^",\}\]]*)\s*([,\}])/g, ': "$1"$2') // Quote unquoted string values
+                    .replace(/,\s*}/g, '}') // Remove trailing commas
+                    .replace(/,\s*]/g, ']'); // Remove trailing commas in arrays
+
+                console.log(`[PRIMARY] Attempting to parse fixed JSON: "${fixedJson}"`);
+                parsedData = JSON.parse(fixedJson);
+                console.log(`[PRIMARY] Successfully parsed fixed JSON:`, parsedData);
+                parseMethod = 'json_fixed';
+            }
+
+            // Extract values from parsed JSON
+            if (parsedData && typeof parsedData === 'object') {
+                // Extract result
+                if (parsedData.result) {
+                    const result = parsedData.result.toString().toUpperCase();
+                    if (result === 'SAFE') {
+                        decision = 'BENIGN';
+                        requiresSecondaryAnalysis = false;
+                    } else if (result === 'THREAT') {
+                        decision = 'MALICIOUS';
+                        requiresSecondaryAnalysis = false;
+                    } else if (result === 'UNKNOWN') {
+                        decision = 'UNCERTAIN';
+                        requiresSecondaryAnalysis = true;
+                    }
                 }
-            } else {
-                confidence = 7; // Default confidence
-                explanation = response.replace(/MALICIOUS/i, '').trim() || 'Malicious request detected';
-            }
 
-        } else if (upperResponse.startsWith('BENIGN')) {
-            decision = 'BENIGN';
-            requiresSecondaryAnalysis = false;
-
-            // Extract confidence and explanation
-            const confidenceMatch = response.match(/CONFIDENCE\s+(\d+)/i);
-            if (confidenceMatch) {
-                confidence = Math.min(10, Math.max(0, parseInt(confidenceMatch[1])));
-                // Extract explanation after confidence number
-                const explanationMatch = response.match(/CONFIDENCE\s+\d+\s+(.+)/i);
-                if (explanationMatch) {
-                    explanation = explanationMatch[1].trim().substring(0, 120);
-                } else {
-                    explanation = 'Benign request identified';
+                // Extract confidence
+                if (parsedData.confidence !== undefined) {
+                    const conf = parseInt(parsedData.confidence);
+                    if (!isNaN(conf)) {
+                        confidence = Math.min(10, Math.max(1, conf));
+                    }
                 }
+
+                // Extract reason
+                if (parsedData.reason && typeof parsedData.reason === 'string') {
+                    explanation = parsedData.reason.trim();
+
+                    // Clean up explanation
+                    if (explanation.length > 200) {
+                        // Find the last complete sentence within 200 chars
+                        const truncated = explanation.substring(0, 200);
+                        const lastPeriod = truncated.lastIndexOf('.');
+                        if (lastPeriod > 50) {
+                            explanation = truncated.substring(0, lastPeriod + 1);
+                        } else {
+                            explanation = truncated + '...';
+                        }
+                    }
+                }
+
+                console.log(`[PRIMARY] Extracted from JSON - Result: ${parsedData.result}, Confidence: ${parsedData.confidence}, Reason: ${parsedData.reason}`);
             } else {
-                confidence = 7; // Default confidence
-                explanation = response.replace(/BENIGN/i, '').trim() || 'Benign request identified';
+                throw new Error('Parsed data is not a valid object');
             }
 
-        } else if (upperResponse.startsWith('UNCERTAIN')) {
-            decision = 'UNCERTAIN';
-            confidence = 5; // Set moderate confidence for uncertain cases
-            requiresSecondaryAnalysis = true;
+        } catch (parseError) {
+            console.error('[PRIMARY] JSON parse error:', parseError.message);
+            console.log(`[PRIMARY] Falling back to text parsing for: "${rawResponse.substring(0, 100)}..."`);
+            parseMethod = 'text_fallback';
 
-            // Extract explanation (no confidence expected for uncertain)
-            explanation = response.replace(/UNCERTAIN/i, '').trim() || 'Uncertain request pattern';
-            if (explanation.length > 120) {
-                explanation = explanation.substring(0, 120);
-            }
+            // Fallback to text parsing if JSON fails
+            const upperResponse = rawResponse.toUpperCase();
 
-        } else {
-            // Fallback parsing - look for keywords anywhere in response
-            if (upperResponse.includes('MALICIOUS')) {
-                decision = 'MALICIOUS';
-                confidence = 6;
-                explanation = 'Malicious indicators found';
-                requiresSecondaryAnalysis = false;
-            } else if (upperResponse.includes('BENIGN')) {
+            if (upperResponse.includes('SAFE') || upperResponse.includes('BENIGN') || upperResponse.includes('NORMAL')) {
                 decision = 'BENIGN';
                 confidence = 6;
-                explanation = 'Benign patterns detected';
+                explanation = 'Safe request identified (text fallback)';
+                requiresSecondaryAnalysis = false;
+            } else if (upperResponse.includes('THREAT') || upperResponse.includes('MALICIOUS') || upperResponse.includes('ATTACK')) {
+                decision = 'MALICIOUS';
+                confidence = 6;
+                explanation = 'Threat indicators found (text fallback)';
                 requiresSecondaryAnalysis = false;
             } else {
                 decision = 'UNCERTAIN';
                 confidence = 3;
-                explanation = 'Unclear response format - escalating';
+                explanation = 'JSON parsing failed - needs review';
                 requiresSecondaryAnalysis = true;
             }
         }
 
-        // Clean up explanation
-        explanation = explanation.replace(/^\W+|\W+$/g, ''); // Remove leading/trailing punctuation
-        if (!explanation || explanation.length < 5) {
+        // Final validation of explanation
+        if (!explanation || explanation.length < 3) {
             explanation = decision === 'MALICIOUS' ? 'Threat detected' :
-                decision === 'BENIGN' ? 'Normal request' :
-                    'Needs further analysis';
+                decision === 'BENIGN' ? 'Normal request' : 'Needs analysis';
         }
 
-        console.log(`[PRIMARY] Parsed - Decision: "${decision}", Confidence: ${confidence}, Explanation: "${explanation}"`);
+        console.log(`[PRIMARY] Final parsed result:`);
+        console.log(`  Decision: "${decision}"`);
+        console.log(`  Confidence: ${confidence}`);
+        console.log(`  Explanation: "${explanation}"`);
+        console.log(`  Requires secondary: ${requiresSecondaryAnalysis}`);
+        console.log(`  Parse method: ${parseMethod}`);
 
         return {
             decision,
@@ -476,8 +541,9 @@ Classification:`;
             model: 'ollama',
             modelName: this.modelName,
             responseTime,
-            rawResponse: rawResponse.substring(0, 200),
-            timestamp: new Date().toISOString()
+            rawResponse: rawResponse.substring(0, 500), // Show more of the response for debugging
+            timestamp: new Date().toISOString(),
+            parseMethod
         };
     }
 
@@ -514,7 +580,7 @@ Classification:`;
 
             return {
                 success: true,
-                message: 'Optimized primary model connection successful',
+                message: 'Improved primary model connection successful',
                 model: 'ollama',
                 modelName: this.modelName,
                 ollamaHost: this.ollamaHost,
@@ -522,14 +588,16 @@ Classification:`;
                     cpuThreads: this.numThread,
                     contextSize: this.numCtx,
                     maxTokens: this.maxTokens,
-                    gpuDisabled: true
+                    gpuDisabled: true,
+                    improvedParsing: true
                 },
                 testTime,
                 testResult: {
                     decision: testResult.decision,
                     confidence: testResult.confidence,
                     explanation: testResult.explanation,
-                    responseTime: testResult.responseTime
+                    responseTime: testResult.responseTime,
+                    rawResponseLength: testResult.rawResponse ? testResult.rawResponse.length : 0
                 },
                 stats: this.getStats()
             };
@@ -552,11 +620,12 @@ Classification:`;
                         '3. Pull model: ollama pull phi3:3.8b',
                         '4. Verify: ollama list'
                     ],
-                    cpuOptimizations: [
-                        'Using phi3:3.8b for better reasoning',
-                        `CPU threads: ${this.numThread}`,
-                        `Context window: ${this.numCtx}`,
-                        'GPU disabled for CPU-only inference'
+                    improvements: [
+                        'Increased max tokens to 150 for complete responses',
+                        'Simplified prompt for small model compatibility',
+                        'Enhanced response parsing with fallbacks',
+                        'Extended timeout for complete generation',
+                        'Removed aggressive stop tokens'
                     ],
                     ollamaStatus: this.ollamaAvailable ? 'Available' : 'Not accessible',
                     modelStatus: this.modelReady ? 'Ready' : 'Not available'
@@ -575,7 +644,8 @@ Classification:`;
                 cpuThreads: this.numThread,
                 contextSize: this.numCtx,
                 maxTokens: this.maxTokens,
-                modelSize: '3.8B parameters (CPU optimized)'
+                modelSize: '3.8B parameters (CPU optimized)',
+                enhancedParsing: true
             },
             initialized: this.isInitialized,
             ollamaAvailable: this.ollamaAvailable,
@@ -616,7 +686,8 @@ Classification:`;
                 cpuThreads: this.numThread,
                 contextSize: this.numCtx,
                 maxTokens: this.maxTokens,
-                modelSize: '3.8B parameters'
+                modelSize: '3.8B parameters',
+                enhancedResponseHandling: true
             },
             initialized: this.isInitialized,
             ollamaAvailable: this.ollamaAvailable,
