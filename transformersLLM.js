@@ -6,25 +6,30 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /**
- * TransformersLLM - Optimized Ollama-powered Security Analyzer
- * Optimized for CPU performance and better response generation
+ * TransformersLLM - Optimized Ollama-powered Security Analyzer with Reasoning Support
+ * Enhanced for reasoning models with think tag handling and real-time display
  */
 class TransformersLLM {
     constructor(options = {}) {
         // Ollama configuration - optimized for CPU
         this.ollamaHost = options.ollamaHost || 'http://localhost:11434';
 
-        // Use smollm for better reasoning while still CPU-friendly
-        this.modelName = options.modelName || 'llama3.2:1b';
+        // Use reasoning model that supports think
+        this.modelName = options.modelName || 'qwen3:1.7b';
 
-        // Optimized parameters for CPU performance with explanation support
-        this.temperature = options.temperature || 0.1; // Lower for consistent responses
-        this.maxTokens = options.maxTokens || 150; // Increased to ensure complete responses
-        this.numCtx = options.numCtx || 2048; // Slightly larger context for better understanding
+        // Optimized parameters for reasoning models
+        this.temperature = options.temperature || 0.3; // Slightly higher for better reasoning
+        this.maxTokens = options.maxTokens || 800; // Much larger for reasoning + response
+        this.numCtx = options.numCtx || 4096; // Larger context for reasoning
 
         // CPU optimization settings - ES module compatible
         this.numThread = options.numThread || this.getOptimalThreadCount();
         this.numGpu = 0; // Force CPU-only
+
+        // think display settings
+        this.enablethinkDisplay = options.enablethinkDisplay !== false;
+        this.thinkCallback = options.thinkCallback || this.defaultthinkCallback;
+        this.typewriterDelay = options.typewriterDelay || 15; // ms between characters
 
         // Runtime state
         this.isInitialized = false;
@@ -38,44 +43,71 @@ class TransformersLLM {
             maliciousCount: 0,
             uncertainCount: 0,
             averageResponseTime: 0,
+            averagethinkTime: 0,
             initializationTime: null
         };
 
-        console.log(`TransformersLLM initializing with optimized CPU settings`);
+        console.log(`TransformersLLM initializing with reasoning model support`);
         console.log(`Ollama host: ${this.ollamaHost}`);
-        console.log(`Model: ${this.modelName} (CPU optimized)`);
+        console.log(`Model: ${this.modelName} (reasoning optimized)`);
         console.log(`CPU threads: ${this.numThread}`);
-        console.log(`Max tokens increased to: ${this.maxTokens}`);
+        console.log(`Max tokens: ${this.maxTokens} (includes think)`);
+        console.log(`think display: ${this.enablethinkDisplay ? 'enabled' : 'disabled'}`);
+    }
+
+    /**
+     * Default think callback for console display
+     */
+    defaultthinkCallback(thinkText, isComplete = false) {
+        if (isComplete) {
+            console.log('\n[think COMPLETE]');
+        } else {
+            process.stdout.write(thinkText);
+        }
+    }
+
+    /**
+     * Display think text with typewriter effect
+     */
+    async displaythink(thinkText) {
+        if (!this.enablethinkDisplay || !thinkText) return;
+
+        console.log('\n[think]');
+
+        // Clean up think text
+        const cleanthink = thinkText
+            .replace(/<\/?think>/g, '')
+            .trim();
+
+        // Typewriter effect
+        for (let i = 0; i < cleanthink.length; i++) {
+            this.thinkCallback(cleanthink[i]);
+            if (this.typewriterDelay > 0) {
+                await new Promise(resolve => setTimeout(resolve, this.typewriterDelay));
+            }
+        }
+
+        this.thinkCallback('', true); // Signal completion
     }
 
     /**
      * Calculate optimal thread count for CPU inference
-     * Uses multiple strategies for better performance detection
      */
     getOptimalThreadCount() {
         try {
             const cpuCount = cpus().length;
-
-            // Strategy 1: Use half of available cores (leave room for OS and other processes)
             const halfCores = Math.max(1, Math.floor(cpuCount / 2));
 
-            // Strategy 2: Optimize based on CPU count ranges
             let optimalThreads;
-
             if (cpuCount <= 2) {
-                // Low-end systems: use 1 thread to avoid overwhelming
                 optimalThreads = 1;
             } else if (cpuCount <= 4) {
-                // Quad-core: use 2 threads for good balance
                 optimalThreads = 2;
             } else if (cpuCount <= 8) {
-                // 6-8 core systems: use 3-4 threads
                 optimalThreads = Math.min(4, halfCores);
             } else if (cpuCount <= 16) {
-                // High-end consumer: use up to 6 threads
                 optimalThreads = Math.min(6, halfCores);
             } else {
-                // Server/workstation: use up to 8 threads (diminishing returns beyond this)
                 optimalThreads = Math.min(8, halfCores);
             }
 
@@ -84,7 +116,7 @@ class TransformersLLM {
 
         } catch (error) {
             console.warn('Could not detect CPU count, defaulting to 2 threads:', error.message);
-            return 2; // Safe default
+            return 2;
         }
     }
 
@@ -132,8 +164,6 @@ class TransformersLLM {
             } else {
                 console.log(`❌ Model ${this.modelName} not found`);
                 console.log('Available models:', availableModels.map(m => m.name).join(', '));
-
-                // Try to pull the model automatically
                 console.log(`Attempting to pull model ${this.modelName}...`);
                 return await this.pullModel();
             }
@@ -164,7 +194,6 @@ class TransformersLLM {
                 throw new Error(`Failed to pull model: ${response.status}`);
             }
 
-            // Stream the response to show progress
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
 
@@ -227,8 +256,6 @@ class TransformersLLM {
             this.isInitialized = true;
 
             console.log(`TransformersLLM initialized successfully in ${initTime}ms`);
-
-            // Perform validation
             await this.validateModel();
 
         } catch (error) {
@@ -239,24 +266,21 @@ class TransformersLLM {
 
     async validateModel() {
         try {
-            console.log('Validating model with test JSON prompt...');
+            console.log('Validating reasoning model with test prompt...');
 
-            const testResult = await this.generateResponse('Task: Is GET /home safe?\n\nRespond with ONLY this JSON format:\n{\n  "result": "SAFE",\n  "confidence": 8,\n  "reason": "Normal homepage request"\n}\n\nJSON:', { maxTokens: 80 });
+            const testResult = await this.generateResponse(
+                this.buildReasoningPrompt({
+                    ip: '127.0.0.1',
+                    method: 'GET',
+                    url: '/test',
+                    queryString: '',
+                    userAgent: 'Test-Validator/1.0'
+                })
+            );
 
             if (testResult && testResult.trim().length > 0) {
                 console.log('✓ Model validation successful');
-                console.log('Test response:', testResult.trim());
-
-                // Try to parse the test response
-                try {
-                    const jsonMatch = testResult.match(/\{[\s\S]*\}/);
-                    if (jsonMatch) {
-                        const parsed = JSON.parse(jsonMatch[0]);
-                        console.log('✓ JSON parsing validation successful:', parsed);
-                    }
-                } catch (parseError) {
-                    console.warn('⚠ JSON parsing validation failed:', parseError.message);
-                }
+                console.log('Test response preview:', testResult.substring(0, 200) + '...');
             } else {
                 console.warn('Model validation produced empty response');
             }
@@ -267,34 +291,30 @@ class TransformersLLM {
     }
 
     /**
-     * Generate response using Ollama API with CPU optimizations
-     * Enhanced to ensure complete response generation
+     * Generate response using Ollama API with streaming for think display
      */
     async generateResponse(prompt, options = {}) {
         try {
+            const useStreaming = this.enablethinkDisplay && !options.noStreaming;
+
             const requestBody = {
                 model: this.modelName,
                 prompt: prompt,
-                stream: false, // Important: non-streaming for complete responses
+                stream: useStreaming,
                 options: {
-                    // CPU performance optimizations
                     temperature: options.temperature || this.temperature,
-                    num_predict: options.maxTokens || this.maxTokens, // Increased limit
+                    num_predict: options.maxTokens || this.maxTokens,
                     num_ctx: this.numCtx,
                     num_thread: this.numThread,
                     num_gpu: this.numGpu,
-
-                    // Sampling optimizations for speed and consistency
-                    top_p: 0.9, // Slightly higher for more complete responses
-                    top_k: 20,  // Increased for better variety
-                    repeat_penalty: 1.1, // Prevent repetition
-
-                    // Remove aggressive stop tokens to allow complete responses
-                    stop: ["<END>", "---", "\n\n\n"] // Only use clear end markers, allow some newlines for JSON
+                    top_p: 0.9,
+                    top_k: 40,
+                    repeat_penalty: 1.1,
+                    stop: ["<END_ANALYSIS>"]
                 }
             };
 
-            console.log(`[GENERATE] Sending prompt (${prompt.length} chars) with max_tokens: ${requestBody.options.num_predict}`);
+            console.log(`[GENERATE] Sending prompt (${prompt.length} chars) with streaming: ${useStreaming}`);
 
             const response = await fetch(`${this.ollamaHost}/api/generate`, {
                 method: 'POST',
@@ -302,57 +322,128 @@ class TransformersLLM {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify(requestBody),
-                // Extended timeout for complete response generation
-                signal: AbortSignal.timeout(35000) // 35 second timeout
+                signal: AbortSignal.timeout(120000) // 120 second timeout for reasoning
             });
 
             if (!response.ok) {
                 throw new Error(`Ollama API error: ${response.status} ${response.statusText}`);
             }
 
-            const data = await response.json();
-
-            if (data.error) {
-                throw new Error(`Ollama error: ${data.error}`);
+            if (useStreaming) {
+                return await this.handleStreamingResponse(response);
+            } else {
+                const data = await response.json();
+                if (data.error) {
+                    throw new Error(`Ollama error: ${data.error}`);
+                }
+                return data.response || '';
             }
-
-            const generatedResponse = data.response || '';
-            console.log(`[GENERATE] Received response (${generatedResponse.length} chars): "${generatedResponse.substring(0, 100)}${generatedResponse.length > 100 ? '...' : ''}"`);
-
-            return generatedResponse;
 
         } catch (error) {
             if (error.name === 'TimeoutError') {
-                throw new Error('Model response timeout (35s) - response may be incomplete');
+                throw new Error('Model response timeout (60s) - reasoning may be incomplete');
             }
             throw error;
         }
     }
 
     /**
-     * Simplified, clear prompt for small model with JSON format
-     * Focused on getting complete structured responses
+     * Handle streaming response with real-time think display
      */
-    buildPrompt(logEntry) {
-        // Much simpler and clearer prompt for small models
-        const request = `METHOD: ${logEntry.method || 'GET'} URL:${logEntry.url || '/'} QUERY: ${logEntry.queryString || 'NONE'}
-`;
+    async handleStreamingResponse(response) {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+
+        let fullResponse = '';
+        let thinkContent = '';
+        let isInthink = false;
+        let hasShownthink = false;
+
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                const chunk = decoder.decode(value);
+                const lines = chunk.split('\n').filter(line => line.trim());
+
+                for (const line of lines) {
+                    try {
+                        const data = JSON.parse(line);
+                        if (data.error) {
+                            throw new Error(`Ollama error: ${data.error}`);
+                        }
+
+                        if (data.response) {
+                            const newContent = data.response;
+                            fullResponse += newContent;
+
+                            // Check for think tags
+                            const currentText = fullResponse;
+                            const thinkStart = currentText.indexOf('<think>');
+                            const thinkEnd = currentText.indexOf('</think>');
+
+                            if (thinkStart !== -1 && thinkEnd !== -1 && !hasShownthink) {
+                                // Extract complete think content
+                                thinkContent = currentText.substring(thinkStart + 10, thinkEnd);
+                                await this.displaythink(thinkContent);
+                                hasShownthink = true;
+                            } else if (thinkStart !== -1 && !isInthink && !hasShownthink) {
+                                // Start of think detected, but not complete yet
+                                isInthink = true;
+                                console.log('\n[think] Model is reasoning...');
+                            }
+                        }
+
+                    } catch (parseError) {
+                        // Ignore JSON parse errors in streaming
+                        continue;
+                    }
+                }
+            }
+
+            console.log(`\n[GENERATE] Received complete response (${fullResponse.length} chars)`);
+            return fullResponse;
+
+        } catch (error) {
+            console.error('[STREAMING] Error during stream processing:', error.message);
+            return fullResponse; // Return what we have so far
+        }
+    }
+
+    /**
+     * Build optimized reasoning prompt for security analysis
+     */
+    buildReasoningPrompt(logEntry) {
+        const request = `${logEntry.method || 'GET'} ${logEntry.url || '/'}${logEntry.queryString ? '?' + logEntry.queryString : ''}`;
         const ip = logEntry.ip || 'unknown';
-        const userAgent = (logEntry.userAgent || 'unknown')
+        const userAgent = (logEntry.userAgent || 'unknown').substring(0, 200);
 
-        return `Task: Analyze this web request for security threats.
-Request: ${request}
-From IP: ${ip}
-User-Agent: ${userAgent}
+        return `You are a cybersecurity expert analyzing web requests for threats. Your task is to determine if this request is SAFE, THREAT, or UNCERTAIN.
+Think through your analysis step by step:
+1. Examine the HTTP method and URL path for suspicious patterns
+2. Check query parameters for injection attempts or malicious payloads  
+3. Analyze the source IP for known threat indicators
+4. Review the User-Agent for bot/scanner signatures or anomalies
+5. Consider the overall context and threat likelihood
+6. Decide on classification and confidence level
+Request Details:
+- Request: ${request}
+- Source IP: ${ip}
+- User-Agent: ${userAgent}
 
-Respond with ONLY this JSON format (no other text):
+Classification Guidelines:
+- SAFE: Normal legitimate requests (home pages, static resources, standard API calls)
+- THREAT: Clear malicious activity (SQL injection, XSS, path traversal, known attack patterns)
+- UNCERTAIN: Suspicious but ambiguous (unusual parameters, uncommon paths, need more context)
+
+Respond with this exact JSON format:
 {
-  "result": "SAFE or THREAT or UNKNOWN",
+  "result": "SAFE|THREAT|UNCERTAIN",
   "confidence": 1-10,
-  "reason": "one sentence explanation"
+  "reason": "brief explanation focusing on key indicators"
 }
-
-JSON:`;
+`;
     }
 
     async analyze(logEntry) {
@@ -361,93 +452,103 @@ JSON:`;
         }
 
         const startTime = Date.now();
+        let thinkTime = 0;
 
         try {
-            console.log(`[PRIMARY] Analyzing request: ${logEntry.method || 'GET'} ${logEntry.url || '/'} from IP: ${logEntry.ip}`);
+            console.log(`\n[ANALYSIS] Analyzing: ${logEntry.method || 'GET'} ${logEntry.url || '/'} from ${logEntry.ip}`);
 
-            const prompt = this.buildPrompt(logEntry);
-            console.log(`[PRIMARY] Using prompt: ${prompt.substring(0, 200)}...`);
+            const prompt = this.buildReasoningPrompt(logEntry);
 
-            const result = await this.generateResponse(prompt, {
-                maxTokens: this.maxTokens,
-                temperature: 0.1
-            });
+            const thinkStart = Date.now();
+            const result = await this.generateResponse(prompt);
+            const responseTime = Date.now() - startTime;
 
-            if (!result || result.trim().length === 0) {
-                throw new Error('No response generated from primary model');
+            // Calculate think time (approximate based on think tags presence)
+            if (result.includes('<think>') && result.includes('</think>')) {
+                thinkTime = Math.max(0, responseTime - 1000); // Rough estimate
             }
 
-            const responseTime = Date.now() - startTime;
-            const rawResponse = result.trim();
+            if (!result || result.trim().length === 0) {
+                throw new Error('No response generated from reasoning model');
+            }
 
-            console.log(`[PRIMARY] Full raw response (${rawResponse.length} chars): "${rawResponse}"`);
-
-            const analysisResult = this.parseResponse(rawResponse, responseTime);
-            this.updateStats(analysisResult, responseTime);
+            const analysisResult = this.parseReasoningResponse(result, responseTime, thinkTime);
+            this.updateStats(analysisResult, responseTime, thinkTime);
 
             return analysisResult;
 
         } catch (error) {
-            console.error('[PRIMARY] Analysis error:', error.message);
+            console.error('[ANALYSIS] Error:', error.message);
 
             return {
                 decision: 'UNCERTAIN',
                 confidence: 0,
-                explanation: `Primary model error: ${error.message}`,
+                explanation: `Analysis error: ${error.message}`,
                 requiresSecondaryAnalysis: true,
                 tier: 'primary',
                 error: true,
-                responseTime: Date.now() - startTime
+                responseTime: Date.now() - startTime,
+                thinkTime: 0
             };
         }
     }
 
-    parseResponse(rawResponse, responseTime) {
-        console.log(`[PRIMARY] Parsing JSON response: "${rawResponse}"`);
+    /**
+     * Parse response from reasoning model, handling think tags
+     */
+    parseReasoningResponse(rawResponse, responseTime, thinkTime) {
+        console.log(`\n[PARSING] Processing reasoning response (${rawResponse.length} chars)`);
 
         let decision = 'UNCERTAIN';
         let confidence = 5;
         let explanation = 'Could not parse response';
         let requiresSecondaryAnalysis = true;
-        let parseMethod = 'json'; // Track how we parsed the response
+        let parseMethod = 'reasoning_json';
+        let thinkContent = '';
 
         try {
-            // First, try to extract JSON from the response
-            let jsonStr = rawResponse.trim();
-
-            // Look for JSON object in the response
-            const jsonMatch = jsonStr.match(/\{[\s\S]*?\}/);
-            if (jsonMatch) {
-                jsonStr = jsonMatch[0];
+            // Extract think content if present
+            const thinkMatch = rawResponse.match(/<think>([\s\S]*?)<\/think>/);
+            if (thinkMatch) {
+                thinkContent = thinkMatch[1].trim();
+                console.log(`[PARSING] Extracted think content (${thinkContent.length} chars)`);
             }
 
-            console.log(`[PRIMARY] Extracted JSON string: "${jsonStr}"`);
+            // Remove think tags and extract JSON
+            let cleanResponse = rawResponse
+                .replace(/<think>[\s\S]*?<\/think>/g, '')
+                .replace(/<\/?think>/g, '')
+                .trim();
 
-            // Parse the JSON
+            // Look for JSON object
+            const jsonMatch = cleanResponse.match(/\{[\s\S]*?\}/);
+            if (!jsonMatch) {
+                throw new Error('No JSON found in response');
+            }
+
+            let jsonStr = jsonMatch[0];
+            console.log(`[PARSING] Extracted JSON: ${jsonStr}`);
+
+            // Parse JSON
             let parsedData;
             try {
                 parsedData = JSON.parse(jsonStr);
-                console.log(`[PRIMARY] Successfully parsed JSON:`, parsedData);
             } catch (jsonError) {
-                console.log(`[PRIMARY] JSON parse failed, attempting to fix common issues...`);
-
                 // Try to fix common JSON issues
                 let fixedJson = jsonStr
-                    .replace(/'/g, '"')  // Replace single quotes with double quotes
-                    .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":') // Add quotes to unquoted keys
-                    .replace(/:\s*([^",\{\[\d\s][^",\}\]]*)\s*([,\}])/g, ': "$1"$2') // Quote unquoted string values
-                    .replace(/,\s*}/g, '}') // Remove trailing commas
-                    .replace(/,\s*]/g, ']'); // Remove trailing commas in arrays
+                    .replace(/'/g, '"')
+                    .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":')
+                    .replace(/:\s*([^",\{\[\d\s][^",\}\]]*)\s*([,\}])/g, ': "$1"$2')
+                    .replace(/,\s*}/g, '}')
+                    .replace(/,\s*]/g, ']');
 
-                console.log(`[PRIMARY] Attempting to parse fixed JSON: "${fixedJson}"`);
                 parsedData = JSON.parse(fixedJson);
-                console.log(`[PRIMARY] Successfully parsed fixed JSON:`, parsedData);
-                parseMethod = 'json_fixed';
+                parseMethod = 'reasoning_json_fixed';
             }
 
-            // Extract values from parsed JSON
+            // Extract values
             if (parsedData && typeof parsedData === 'object') {
-                // Extract result
+                // Map result to our decision format
                 if (parsedData.result) {
                     const result = parsedData.result.toString().toUpperCase();
                     if (result === 'SAFE') {
@@ -456,7 +557,7 @@ JSON:`;
                     } else if (result === 'THREAT') {
                         decision = 'MALICIOUS';
                         requiresSecondaryAnalysis = false;
-                    } else if (result === 'UNKNOWN') {
+                    } else if (result === 'UNCERTAIN') {
                         decision = 'UNCERTAIN';
                         requiresSecondaryAnalysis = true;
                     }
@@ -475,61 +576,41 @@ JSON:`;
                     explanation = parsedData.reason.trim();
 
                     // Clean up explanation
-                    if (explanation.length > 200) {
-                        // Find the last complete sentence within 200 chars
-                        const truncated = explanation.substring(0, 200);
+                    if (explanation.length > 250) {
+                        const truncated = explanation.substring(0, 250);
                         const lastPeriod = truncated.lastIndexOf('.');
-                        if (lastPeriod > 50) {
-                            explanation = truncated.substring(0, lastPeriod + 1);
-                        } else {
-                            explanation = truncated + '...';
-                        }
+                        explanation = lastPeriod > 50 ? truncated.substring(0, lastPeriod + 1) : truncated + '...';
                     }
                 }
-
-                console.log(`[PRIMARY] Extracted from JSON - Result: ${parsedData.result}, Confidence: ${parsedData.confidence}, Reason: ${parsedData.reason}`);
-            } else {
-                throw new Error('Parsed data is not a valid object');
             }
 
-        } catch (parseError) {
-            console.error('[PRIMARY] JSON parse error:', parseError.message);
-            console.log(`[PRIMARY] Falling back to text parsing for: "${rawResponse.substring(0, 100)}..."`);
-            parseMethod = 'text_fallback';
+            console.log(`[PARSING] Reasoning result: ${decision} (confidence: ${confidence})`);
+            console.log(`[PARSING] Explanation: "${explanation}"`);
 
-            // Fallback to text parsing if JSON fails
+        } catch (parseError) {
+            console.error('[PARSING] JSON parse failed:', parseError.message);
+            parseMethod = 'reasoning_fallback';
+
+            // Fallback to text analysis
             const upperResponse = rawResponse.toUpperCase();
 
-            if (upperResponse.includes('SAFE') || upperResponse.includes('BENIGN') || upperResponse.includes('NORMAL')) {
+            if (upperResponse.includes('SAFE') || upperResponse.includes('BENIGN') || upperResponse.includes('LEGITIMATE')) {
                 decision = 'BENIGN';
                 confidence = 6;
-                explanation = 'Safe request identified (text fallback)';
+                explanation = 'Identified as safe through text analysis';
                 requiresSecondaryAnalysis = false;
             } else if (upperResponse.includes('THREAT') || upperResponse.includes('MALICIOUS') || upperResponse.includes('ATTACK')) {
                 decision = 'MALICIOUS';
                 confidence = 6;
-                explanation = 'Threat indicators found (text fallback)';
+                explanation = 'Threat indicators found in analysis';
                 requiresSecondaryAnalysis = false;
             } else {
                 decision = 'UNCERTAIN';
-                confidence = 3;
-                explanation = 'JSON parsing failed - needs review';
+                confidence = 4;
+                explanation = 'Response parsing failed - requires review';
                 requiresSecondaryAnalysis = true;
             }
         }
-
-        // Final validation of explanation
-        if (!explanation || explanation.length < 3) {
-            explanation = decision === 'MALICIOUS' ? 'Threat detected' :
-                decision === 'BENIGN' ? 'Normal request' : 'Needs analysis';
-        }
-
-        console.log(`[PRIMARY] Final parsed result:`);
-        console.log(`  Decision: "${decision}"`);
-        console.log(`  Confidence: ${confidence}`);
-        console.log(`  Explanation: "${explanation}"`);
-        console.log(`  Requires secondary: ${requiresSecondaryAnalysis}`);
-        console.log(`  Parse method: ${parseMethod}`);
 
         return {
             decision,
@@ -537,16 +618,18 @@ JSON:`;
             explanation,
             requiresSecondaryAnalysis,
             tier: 'primary',
-            model: 'ollama',
+            model: 'ollama-reasoning',
             modelName: this.modelName,
             responseTime,
-            rawResponse: rawResponse.substring(0, 500), // Show more of the response for debugging
+            thinkTime,
+            rawResponse: rawResponse.substring(0, 800),
+            thinkContent: thinkContent.substring(0, 300),
             timestamp: new Date().toISOString(),
             parseMethod
         };
     }
 
-    updateStats(result, responseTime) {
+    updateStats(result, responseTime, thinkTime = 0) {
         this.stats.totalAnalyzed++;
 
         switch (result.decision) {
@@ -557,6 +640,9 @@ JSON:`;
 
         this.stats.averageResponseTime =
             (this.stats.averageResponseTime * (this.stats.totalAnalyzed - 1) + responseTime) / this.stats.totalAnalyzed;
+
+        this.stats.averagethinkTime =
+            (this.stats.averagethinkTime * (this.stats.totalAnalyzed - 1) + thinkTime) / this.stats.totalAnalyzed;
     }
 
     async testConnection() {
@@ -570,25 +656,30 @@ JSON:`;
             const testResult = await this.analyze({
                 ip: '192.168.1.100',
                 method: 'GET',
-                url: '/home',
-                queryString: '',
-                userAgent: 'Test-Browser/1.0'
+                url: '/api/test',
+                queryString: 'param=value',
+                userAgent: 'Test-Browser/2.0'
             });
 
             const testTime = Date.now() - testStart;
 
             return {
                 success: true,
-                message: 'Improved primary model connection successful',
-                model: 'ollama',
+                message: 'Reasoning model connection successful',
+                model: 'ollama-reasoning',
                 modelName: this.modelName,
                 ollamaHost: this.ollamaHost,
+                features: {
+                    reasoningSupport: true,
+                    thinkDisplay: this.enablethinkDisplay,
+                    streamingResponse: true,
+                    enhancedPrompting: true
+                },
                 optimizations: {
                     cpuThreads: this.numThread,
                     contextSize: this.numCtx,
                     maxTokens: this.maxTokens,
-                    gpuDisabled: true,
-                    improvedParsing: true
+                    typewriterDelay: this.typewriterDelay
                 },
                 testTime,
                 testResult: {
@@ -596,38 +687,33 @@ JSON:`;
                     confidence: testResult.confidence,
                     explanation: testResult.explanation,
                     responseTime: testResult.responseTime,
-                    rawResponseLength: testResult.rawResponse ? testResult.rawResponse.length : 0
+                    thinkTime: testResult.thinkTime,
+                    hasthink: testResult.thinkContent?.length > 0
                 },
                 stats: this.getStats()
             };
 
         } catch (error) {
-            console.error('[PRIMARY] Connection test failed:', error.message);
-
             return {
                 success: false,
-                message: `Primary model connection failed: ${error.message}`,
-                model: 'ollama',
+                message: `Reasoning model connection failed: ${error.message}`,
+                model: 'ollama-reasoning',
                 modelName: this.modelName,
-                ollamaHost: this.ollamaHost,
                 error: error.message,
-                initialized: this.isInitialized,
                 troubleshooting: {
                     steps: [
                         '1. Install Ollama: curl -fsSL https://ollama.ai/install.sh | sh',
                         '2. Start Ollama: ollama serve',
-                        '3. Pull model: ollama pull phi3:3.8b',
+                        '3. Pull reasoning model: ollama pull qwen2.5-coder:7b',
                         '4. Verify: ollama list'
                     ],
-                    improvements: [
-                        'Increased max tokens to 150 for complete responses',
-                        'Simplified prompt for small model compatibility',
-                        'Enhanced response parsing with fallbacks',
-                        'Extended timeout for complete generation',
-                        'Removed aggressive stop tokens'
-                    ],
-                    ollamaStatus: this.ollamaAvailable ? 'Available' : 'Not accessible',
-                    modelStatus: this.modelReady ? 'Ready' : 'Not available'
+                    features: [
+                        'Enhanced reasoning with <think> tags',
+                        'Real-time think display with typewriter effect',
+                        'Improved uncertainty handling',
+                        'Streaming response support',
+                        'Optimized prompting for reasoning models'
+                    ]
                 }
             };
         }
@@ -636,75 +722,70 @@ JSON:`;
     getStats() {
         const total = this.stats.totalAnalyzed;
         return {
-            model: 'ollama',
+            model: 'ollama-reasoning',
             modelName: this.modelName,
             ollamaHost: this.ollamaHost,
-            optimizations: {
-                cpuThreads: this.numThread,
-                contextSize: this.numCtx,
-                maxTokens: this.maxTokens,
-                modelSize: '3.8B parameters (CPU optimized)',
-                enhancedParsing: true
+            features: {
+                reasoningSupport: true,
+                thinkDisplay: this.enablethinkDisplay,
+                streamingResponse: true
             },
             initialized: this.isInitialized,
-            ollamaAvailable: this.ollamaAvailable,
-            modelReady: this.modelReady,
-            initializationTime: this.stats.initializationTime,
             totalAnalyzed: total,
             benignCount: this.stats.benignCount,
             maliciousCount: this.stats.maliciousCount,
             uncertainCount: this.stats.uncertainCount,
-            benignPercent: total > 0 ? ((this.stats.benignCount / total) * 100).toFixed(1) : '0.0',
-            maliciousPercent: total > 0 ? ((this.stats.maliciousCount / total) * 100).toFixed(1) : '0.0',
-            uncertainPercent: total > 0 ? ((this.stats.uncertainCount / total) * 100).toFixed(1) : '0.0',
             averageResponseTime: Math.round(this.stats.averageResponseTime),
-            escalationRate: total > 0 ? ((this.stats.uncertainCount / total) * 100).toFixed(1) + '%' : '0.0%',
-            primaryResolutionRate: total > 0 ? (((total - this.stats.uncertainCount) / total) * 100).toFixed(1) + '%' : '0.0%'
+            averagethinkTime: Math.round(this.stats.averagethinkTime),
+            distributionPercent: {
+                benign: total > 0 ? ((this.stats.benignCount / total) * 100).toFixed(1) : '0.0',
+                malicious: total > 0 ? ((this.stats.maliciousCount / total) * 100).toFixed(1) : '0.0',
+                uncertain: total > 0 ? ((this.stats.uncertainCount / total) * 100).toFixed(1) : '0.0'
+            },
+            performanceMetrics: {
+                primaryResolutionRate: total > 0 ? (((total - this.stats.uncertainCount) / total) * 100).toFixed(1) + '%' : '0.0%',
+                escalationRate: total > 0 ? ((this.stats.uncertainCount / total) * 100).toFixed(1) + '%' : '0.0%'
+            }
         };
     }
 
     resetStats() {
-        const oldStats = { ...this.stats };
         this.stats = {
             totalAnalyzed: 0,
             benignCount: 0,
             maliciousCount: 0,
             uncertainCount: 0,
             averageResponseTime: 0,
+            averagethinkTime: 0,
             initializationTime: this.stats.initializationTime
         };
-        console.log('Primary model statistics reset');
+        console.log('Reasoning model statistics reset');
     }
 
     getModelInfo() {
         return {
-            model: 'ollama',
+            model: 'ollama-reasoning',
             modelName: this.modelName,
             ollamaHost: this.ollamaHost,
-            optimizations: {
-                cpuThreads: this.numThread,
-                contextSize: this.numCtx,
-                maxTokens: this.maxTokens,
-                modelSize: '3.8B parameters',
-                enhancedResponseHandling: true
+            capabilities: {
+                reasoning: true,
+                think: true,
+                streaming: true,
+                uncertainty: true
             },
-            initialized: this.isInitialized,
-            ollamaAvailable: this.ollamaAvailable,
-            modelReady: this.modelReady
+            initialized: this.isInitialized
         };
     }
 
     clearHistory() {
-        // Ollama is stateless, so no history to clear
-        console.log('Ollama is stateless - no history to clear');
+        console.log('Ollama reasoning model is stateless - no history to clear');
     }
 
     async dispose() {
         try {
-            console.log('Disposing TransformersLLM resources...');
-            // Ollama doesn't require explicit cleanup
+            console.log('Disposing reasoning model resources...');
             this.isInitialized = false;
-            console.log('TransformersLLM disposed successfully');
+            console.log('Reasoning model disposed successfully');
         } catch (error) {
             console.warn('Error during disposal:', error.message);
         }

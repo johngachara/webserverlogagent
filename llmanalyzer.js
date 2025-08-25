@@ -88,7 +88,7 @@ class LLMAnalyzer {
             maliciousConfidenceThreshold: 8,
 
             // Two-tier system settings
-            primaryTimeoutMs: 60000,                 // Primary model timeout
+            primaryTimeoutMs: 300000,                 // Long timeout due to use of reasoning model
             maxPrimaryRetries: 1,                   // Primary model retry attempts
             escalationThreshold: 5,                 // Confidence level that triggers escalation
 
