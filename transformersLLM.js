@@ -7,29 +7,28 @@ const __dirname = path.dirname(__filename);
 
 /**
  * TransformersLLM - Optimized Ollama-powered Security Analyzer with Reasoning Support
- * Enhanced for reasoning models with think tag handling and real-time display
+ * Enhanced for reasoning models with thinking tag handling and real-time display
  */
 class TransformersLLM {
     constructor(options = {}) {
         // Ollama configuration - optimized for CPU
         this.ollamaHost = options.ollamaHost || 'http://localhost:11434';
 
-        // Use reasoning model that supports think
-        this.modelName = options.modelName || 'qwen3:1.7b';
+        // Use faster model for speed - consider switching to smaller reasoning model
+        this.modelName = options.modelName || 'qwen3:1.7b'; // Smaller model for speed
 
-        // Optimized parameters for reasoning models
-        this.temperature = options.temperature || 0.3; // Slightly higher for better reasoning
-        this.maxTokens = options.maxTokens || 800; // Much larger for reasoning + response
-        this.numCtx = options.numCtx || 4096; // Larger context for reasoning
+        // Optimized parameters for fast reasoning
+        this.temperature = options.temperature || 0.1; // Lower for faster, more focused reasoning
+        this.maxTokens = options.maxTokens || 500; // Reduced for faster responses
+        this.numCtx = options.numCtx || 2048; // Smaller context for speed
+        this.reasoningMode = options.reasoningMode || 'fast'; // 'fast', 'balanced', 'thorough'
 
         // CPU optimization settings - ES module compatible
         this.numThread = options.numThread || this.getOptimalThreadCount();
         this.numGpu = 0; // Force CPU-only
 
-        // think display settings
-        this.enablethinkDisplay = options.enablethinkDisplay !== false;
-        this.thinkCallback = options.thinkCallback || this.defaultthinkCallback;
-        this.typewriterDelay = options.typewriterDelay || 15; // ms between characters
+        // Thinking display settings - simplified
+        this.enableThinkingDisplay = options.enableThinkingDisplay !== false;
 
         // Runtime state
         this.isInitialized = false;
@@ -43,51 +42,28 @@ class TransformersLLM {
             maliciousCount: 0,
             uncertainCount: 0,
             averageResponseTime: 0,
-            averagethinkTime: 0,
+            averageThinkingTime: 0,
             initializationTime: null
         };
 
         console.log(`TransformersLLM initializing with reasoning model support`);
         console.log(`Ollama host: ${this.ollamaHost}`);
-        console.log(`Model: ${this.modelName} (reasoning optimized)`);
+        console.log(`Model: ${this.modelName} (speed optimized)`);
+        console.log(`Reasoning mode: ${this.reasoningMode}`);
         console.log(`CPU threads: ${this.numThread}`);
-        console.log(`Max tokens: ${this.maxTokens} (includes think)`);
-        console.log(`think display: ${this.enablethinkDisplay ? 'enabled' : 'disabled'}`);
+        console.log(`Max tokens: ${this.maxTokens} (reduced for speed)`);
+        console.log(`Thinking display: ${this.enableThinkingDisplay ? 'enabled' : 'disabled'}`);
     }
 
     /**
-     * Default think callback for console display
+     * Display final thinking content (no streaming)
      */
-    defaultthinkCallback(thinkText, isComplete = false) {
-        if (isComplete) {
-            console.log('\n[think COMPLETE]');
-        } else {
-            process.stdout.write(thinkText);
-        }
-    }
+    displayThinking(thinkingText) {
+        if (!this.enableThinkingDisplay || !thinkingText) return;
 
-    /**
-     * Display think text with typewriter effect
-     */
-    async displaythink(thinkText) {
-        if (!this.enablethinkDisplay || !thinkText) return;
-
-        console.log('\n[think]');
-
-        // Clean up think text
-        const cleanthink = thinkText
-            .replace(/<\/?think>/g, '')
-            .trim();
-
-        // Typewriter effect
-        for (let i = 0; i < cleanthink.length; i++) {
-            this.thinkCallback(cleanthink[i]);
-            if (this.typewriterDelay > 0) {
-                await new Promise(resolve => setTimeout(resolve, this.typewriterDelay));
-            }
-        }
-
-        this.thinkCallback('', true); // Signal completion
+        console.log('\n[THINKING]');
+        console.log(thinkingText.replace(/<\/?think>/g, '').trim());
+        console.log('[THINKING COMPLETE]');
     }
 
     /**
@@ -291,30 +267,33 @@ class TransformersLLM {
     }
 
     /**
-     * Generate response using Ollama API with streaming for think display
+     * Generate response using Ollama API without streaming
      */
     async generateResponse(prompt, options = {}) {
         try {
-            const useStreaming = this.enablethinkDisplay && !options.noStreaming;
-
             const requestBody = {
                 model: this.modelName,
                 prompt: prompt,
-                stream: useStreaming,
+                stream: false, // No streaming - get complete response
                 options: {
+                    // Speed-optimized generation parameters
                     temperature: options.temperature || this.temperature,
                     num_predict: options.maxTokens || this.maxTokens,
                     num_ctx: this.numCtx,
                     num_thread: this.numThread,
                     num_gpu: this.numGpu,
-                    top_p: 0.9,
-                    top_k: 40,
-                    repeat_penalty: 1.1,
-                    stop: ["<END_ANALYSIS>"]
+
+                    // Fast sampling for quicker responses
+                    top_p: 0.7, // More focused sampling
+                    top_k: 10,  // Smaller candidate pool for speed
+                    repeat_penalty: 1.05, // Lower penalty for speed
+
+                    // Aggressive stopping for faster completion
+                    stop: ["JSON:", "\n\n\n", "---", "<END>"]
                 }
             };
 
-            console.log(`[GENERATE] Sending prompt (${prompt.length} chars) with streaming: ${useStreaming}`);
+            console.log(`[GENERATE] Sending prompt (${prompt.length} chars) - non-streaming`);
 
             const response = await fetch(`${this.ollamaHost}/api/generate`, {
                 method: 'POST',
@@ -322,111 +301,128 @@ class TransformersLLM {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify(requestBody),
-                signal: AbortSignal.timeout(120000) // 120 second timeout for reasoning
+                signal: AbortSignal.timeout(60000) // Reduced to 20 seconds for faster responses
             });
 
             if (!response.ok) {
                 throw new Error(`Ollama API error: ${response.status} ${response.statusText}`);
             }
 
-            if (useStreaming) {
-                return await this.handleStreamingResponse(response);
-            } else {
-                const data = await response.json();
-                if (data.error) {
-                    throw new Error(`Ollama error: ${data.error}`);
-                }
-                return data.response || '';
+            const data = await response.json();
+            if (data.error) {
+                throw new Error(`Ollama error: ${data.error}`);
             }
+
+            const fullResponse = data.response || '';
+            console.log(`[GENERATE] Received complete response (${fullResponse.length} chars)`);
+
+            // Extract and display thinking if present
+            const thinkMatch = fullResponse.match(/<think>([\s\S]*?)<\/think>/);
+            if (thinkMatch) {
+                this.displayThinking(thinkMatch[1]);
+            }
+
+            return fullResponse;
 
         } catch (error) {
             if (error.name === 'TimeoutError') {
-                throw new Error('Model response timeout (60s) - reasoning may be incomplete');
+                throw new Error('Model response timeout (20s) - switching to faster mode recommended');
             }
             throw error;
         }
     }
 
     /**
-     * Handle streaming response with real-time think display
-     */
-    async handleStreamingResponse(response) {
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-
-        let fullResponse = '';
-        let thinkContent = '';
-        let isInthink = false;
-        let hasShownthink = false;
-
-        try {
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-
-                const chunk = decoder.decode(value);
-                const lines = chunk.split('\n').filter(line => line.trim());
-
-                for (const line of lines) {
-                    try {
-                        const data = JSON.parse(line);
-                        if (data.error) {
-                            throw new Error(`Ollama error: ${data.error}`);
-                        }
-
-                        if (data.response) {
-                            const newContent = data.response;
-                            fullResponse += newContent;
-
-                            // Check for think tags
-                            const currentText = fullResponse;
-                            const thinkStart = currentText.indexOf('<think>');
-                            const thinkEnd = currentText.indexOf('</think>');
-
-                            if (thinkStart !== -1 && thinkEnd !== -1 && !hasShownthink) {
-                                // Extract complete think content
-                                thinkContent = currentText.substring(thinkStart + 10, thinkEnd);
-                                await this.displaythink(thinkContent);
-                                hasShownthink = true;
-                            } else if (thinkStart !== -1 && !isInthink && !hasShownthink) {
-                                // Start of think detected, but not complete yet
-                                isInthink = true;
-                                console.log('\n[think] Model is reasoning...');
-                            }
-                        }
-
-                    } catch (parseError) {
-                        // Ignore JSON parse errors in streaming
-                        continue;
-                    }
-                }
-            }
-
-            console.log(`\n[GENERATE] Received complete response (${fullResponse.length} chars)`);
-            return fullResponse;
-
-        } catch (error) {
-            console.error('[STREAMING] Error during stream processing:', error.message);
-            return fullResponse; // Return what we have so far
-        }
-    }
-
-    /**
-     * Build optimized reasoning prompt for security analysis
+     * Build speed-optimized reasoning prompt based on mode
      */
     buildReasoningPrompt(logEntry) {
         const request = `${logEntry.method || 'GET'} ${logEntry.url || '/'}${logEntry.queryString ? '?' + logEntry.queryString : ''}`;
         const ip = logEntry.ip || 'unknown';
-        const userAgent = (logEntry.userAgent || 'unknown').substring(0, 200);
+        const userAgent = (logEntry.userAgent || 'unknown').substring(0, 150);
 
-        return `You are a cybersecurity expert analyzing web requests for threats. Your task is to determine if this request is SAFE, THREAT, or UNCERTAIN.
-Think through your analysis step by step:
+        // Different prompt intensities based on reasoning mode
+        if (this.reasoningMode === 'fast') {
+            return this.buildFastPrompt(request, ip, userAgent);
+        } else if (this.reasoningMode === 'balanced') {
+            return this.buildBalancedPrompt(request, ip, userAgent);
+        } else {
+            return this.buildThoroughPrompt(request, ip, userAgent);
+        }
+    }
+
+    /**
+     * Ultra-fast reasoning prompt - minimal thinking
+     */
+    buildFastPrompt(request, ip, userAgent) {
+        return `Evaluate if this web request follows normal website interaction patterns:
+Does this look like someone browsing a website normally? Quick yes/no check.
+Request: ${request}
+IP: ${ip}
+Agent: ${userAgent}
+Simple classification:
+- SAFE: Regular webpage visits, downloading files, standard API calls, typical user actions
+- THREAT: System file access, unusual paths, uncommon parameter patterns, non-web resources
+- UNCERTAIN: Could be either depending on context
+
+Focus only on: Does this request match how people typically interact with websites?
+
+Respond exactly:
+{
+  "result": "SAFE",
+  "confidence": 8,
+  "reason": "brief explanation"
+}
+JSON:`;
+    }
+
+    /**
+     * Balanced reasoning prompt - moderate thinking
+     */
+    buildBalancedPrompt(request, ip, userAgent) {
+        return `Security analysis of web request:
+
+<think>
+1. Check URL and method for obvious threats
+2. Examine parameters for injection patterns
+3. Review User-Agent for bot signatures
+4. Make classification decision
+</think>
+
+Request: ${request}
+Source: ${ip}
+User-Agent: ${userAgent}
+
+Classify as:
+- SAFE: Legitimate traffic (home, API, resources)
+- THREAT: Attack patterns (injection, traversal, scanning)
+- UNCERTAIN: Suspicious but unclear (unusual params, uncommon paths)
+
+You must respond with this exact JSON format:
+{
+  "result": "SAFE",
+  "confidence": 7,
+  "reason": "key finding"
+}
+
+JSON:`;
+    }
+
+    /**
+     * Thorough reasoning prompt - detailed thinking
+     */
+    buildThoroughPrompt(request, ip, userAgent) {
+        return `You are a cybersecurity expert analyzing web requests for threats.
+
+<think>
+Step by step analysis:
 1. Examine the HTTP method and URL path for suspicious patterns
 2. Check query parameters for injection attempts or malicious payloads  
 3. Analyze the source IP for known threat indicators
 4. Review the User-Agent for bot/scanner signatures or anomalies
 5. Consider the overall context and threat likelihood
 6. Decide on classification and confidence level
+</think>
+
 Request Details:
 - Request: ${request}
 - Source IP: ${ip}
@@ -437,13 +433,14 @@ Classification Guidelines:
 - THREAT: Clear malicious activity (SQL injection, XSS, path traversal, known attack patterns)
 - UNCERTAIN: Suspicious but ambiguous (unusual parameters, uncommon paths, need more context)
 
-Respond with this exact JSON format:
+You must respond with this exact JSON format:
 {
-  "result": "SAFE|THREAT|UNCERTAIN",
-  "confidence": 1-10,
+  "result": "SAFE",
+  "confidence": 8,
   "reason": "brief explanation focusing on key indicators"
 }
-`;
+
+JSON:`;
     }
 
     async analyze(logEntry) {
@@ -452,28 +449,29 @@ Respond with this exact JSON format:
         }
 
         const startTime = Date.now();
-        let thinkTime = 0;
+        let thinkingTime = 0;
 
         try {
             console.log(`\n[ANALYSIS] Analyzing: ${logEntry.method || 'GET'} ${logEntry.url || '/'} from ${logEntry.ip}`);
 
             const prompt = this.buildReasoningPrompt(logEntry);
 
-            const thinkStart = Date.now();
+
+            const thinkingStart = Date.now();
             const result = await this.generateResponse(prompt);
             const responseTime = Date.now() - startTime;
 
-            // Calculate think time (approximate based on think tags presence)
+            // Calculate thinking time (approximate based on thinking tags presence)
             if (result.includes('<think>') && result.includes('</think>')) {
-                thinkTime = Math.max(0, responseTime - 1000); // Rough estimate
+                thinkingTime = Math.max(0, responseTime - 1000); // Rough estimate
             }
 
             if (!result || result.trim().length === 0) {
                 throw new Error('No response generated from reasoning model');
             }
 
-            const analysisResult = this.parseReasoningResponse(result, responseTime, thinkTime);
-            this.updateStats(analysisResult, responseTime, thinkTime);
+            const analysisResult = this.parseReasoningResponse(result, responseTime, thinkingTime);
+            this.updateStats(analysisResult, responseTime, thinkingTime);
 
             return analysisResult;
 
@@ -488,69 +486,105 @@ Respond with this exact JSON format:
                 tier: 'primary',
                 error: true,
                 responseTime: Date.now() - startTime,
-                thinkTime: 0
+                thinkingTime: 0
             };
         }
     }
 
     /**
-     * Parse response from reasoning model, handling think tags
+     * Parse response from reasoning model, handling thinking tags
      */
-    parseReasoningResponse(rawResponse, responseTime, thinkTime) {
+    parseReasoningResponse(rawResponse, responseTime, thinkingTime) {
         console.log(`\n[PARSING] Processing reasoning response (${rawResponse.length} chars)`);
+        console.log(`[PARSING] Raw response: "${rawResponse}"`);
 
         let decision = 'UNCERTAIN';
         let confidence = 5;
         let explanation = 'Could not parse response';
         let requiresSecondaryAnalysis = true;
         let parseMethod = 'reasoning_json';
-        let thinkContent = '';
+        let thinkingContent = '';
 
         try {
-            // Extract think content if present
-            const thinkMatch = rawResponse.match(/<think>([\s\S]*?)<\/think>/);
-            if (thinkMatch) {
-                thinkContent = thinkMatch[1].trim();
-                console.log(`[PARSING] Extracted think content (${thinkContent.length} chars)`);
+            // Extract thinking content if present
+            const thinkingMatch = rawResponse.match(/<think>([\s\S]*?)<\/think>/);
+            if (thinkingMatch) {
+                thinkingContent = thinkingMatch[1].trim();
+                console.log(`[PARSING] Extracted thinking content (${thinkingContent.length} chars)`);
             }
 
-            // Remove think tags and extract JSON
+            // Remove thinking tags and extract JSON
             let cleanResponse = rawResponse
                 .replace(/<think>[\s\S]*?<\/think>/g, '')
                 .replace(/<\/?think>/g, '')
                 .trim();
 
-            // Look for JSON object
-            const jsonMatch = cleanResponse.match(/\{[\s\S]*?\}/);
+            console.log(`[PARSING] Clean response after removing thinking: "${cleanResponse}"`);
+
+            // More aggressive JSON extraction - look for any JSON pattern
+            let jsonMatch = cleanResponse.match(/\{[\s\S]*?\}/);
+
+            // If no complete JSON, try to find JSON starting with {
+            if (!jsonMatch) {
+                console.log('[PARSING] No complete JSON found, looking for partial JSON...');
+
+                // Look for JSON starting pattern
+                const jsonStart = cleanResponse.indexOf('{');
+                if (jsonStart !== -1) {
+                    let potentialJson = cleanResponse.substring(jsonStart);
+
+                    // Try to complete the JSON if it seems truncated
+                    if (!potentialJson.includes('}')) {
+                        // Try to construct basic JSON from content
+                        if (cleanResponse.includes('SAFE') || cleanResponse.includes('safe')) {
+                            potentialJson = '{"result": "SAFE", "confidence": 7, "reason": "appears safe"}';
+                        } else if (cleanResponse.includes('THREAT') || cleanResponse.includes('threat') || cleanResponse.includes('malicious')) {
+                            potentialJson = '{"result": "THREAT", "confidence": 7, "reason": "threat detected"}';
+                        } else {
+                            potentialJson = '{"result": "UNCERTAIN", "confidence": 5, "reason": "needs review"}';
+                        }
+                    }
+
+                    jsonMatch = [potentialJson];
+                    console.log(`[PARSING] Constructed/found JSON: "${jsonMatch[0]}"`);
+                }
+            }
+
             if (!jsonMatch) {
                 throw new Error('No JSON found in response');
             }
 
-            let jsonStr = jsonMatch[0];
+            let jsonStr = jsonMatch[0].trim();
             console.log(`[PARSING] Extracted JSON: ${jsonStr}`);
 
             // Parse JSON
             let parsedData;
             try {
                 parsedData = JSON.parse(jsonStr);
+                console.log(`[PARSING] Successfully parsed JSON:`, parsedData);
             } catch (jsonError) {
+                console.log(`[PARSING] JSON parse failed, attempting to fix: ${jsonError.message}`);
+
                 // Try to fix common JSON issues
                 let fixedJson = jsonStr
-                    .replace(/'/g, '"')
-                    .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":')
-                    .replace(/:\s*([^",\{\[\d\s][^",\}\]]*)\s*([,\}])/g, ': "$1"$2')
-                    .replace(/,\s*}/g, '}')
+                    .replace(/'/g, '"')  // Replace single quotes
+                    .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":')  // Quote keys
+                    .replace(/:\s*([^",\{\[\d\s][^",\}\]]*)\s*([,\}])/g, ': "$1"$2')  // Quote string values
+                    .replace(/,\s*}/g, '}')  // Remove trailing commas
                     .replace(/,\s*]/g, ']');
 
+                console.log(`[PARSING] Fixed JSON attempt: "${fixedJson}"`);
                 parsedData = JSON.parse(fixedJson);
                 parseMethod = 'reasoning_json_fixed';
             }
 
-            // Extract values
+            // Extract values from parsed JSON
             if (parsedData && typeof parsedData === 'object') {
                 // Map result to our decision format
                 if (parsedData.result) {
                     const result = parsedData.result.toString().toUpperCase();
+                    console.log(`[PARSING] Found result: "${result}"`);
+
                     if (result === 'SAFE') {
                         decision = 'BENIGN';
                         requiresSecondaryAnalysis = false;
@@ -582,24 +616,26 @@ Respond with this exact JSON format:
                         explanation = lastPeriod > 50 ? truncated.substring(0, lastPeriod + 1) : truncated + '...';
                     }
                 }
+
+                console.log(`[PARSING] Final extracted values: result=${decision}, confidence=${confidence}, reason="${explanation}"`);
             }
 
-            console.log(`[PARSING] Reasoning result: ${decision} (confidence: ${confidence})`);
-            console.log(`[PARSING] Explanation: "${explanation}"`);
-
         } catch (parseError) {
-            console.error('[PARSING] JSON parse failed:', parseError.message);
+            console.error('[PARSING] All JSON parse attempts failed:', parseError.message);
             parseMethod = 'reasoning_fallback';
 
-            // Fallback to text analysis
+            // Enhanced fallback to text analysis
             const upperResponse = rawResponse.toUpperCase();
+            console.log(`[PARSING] Using text fallback analysis on: "${upperResponse.substring(0, 100)}..."`);
 
-            if (upperResponse.includes('SAFE') || upperResponse.includes('BENIGN') || upperResponse.includes('LEGITIMATE')) {
+            if (upperResponse.includes('SAFE') || upperResponse.includes('BENIGN') || upperResponse.includes('LEGITIMATE') ||
+                upperResponse.includes('NORMAL') || upperResponse.includes('OK')) {
                 decision = 'BENIGN';
                 confidence = 6;
                 explanation = 'Identified as safe through text analysis';
                 requiresSecondaryAnalysis = false;
-            } else if (upperResponse.includes('THREAT') || upperResponse.includes('MALICIOUS') || upperResponse.includes('ATTACK')) {
+            } else if (upperResponse.includes('THREAT') || upperResponse.includes('MALICIOUS') || upperResponse.includes('ATTACK') ||
+                upperResponse.includes('INJECTION') || upperResponse.includes('EXPLOIT')) {
                 decision = 'MALICIOUS';
                 confidence = 6;
                 explanation = 'Threat indicators found in analysis';
@@ -612,6 +648,8 @@ Respond with this exact JSON format:
             }
         }
 
+        console.log(`[PARSING] Final result: ${decision} (confidence: ${confidence}) - "${explanation}"`);
+
         return {
             decision,
             confidence,
@@ -621,15 +659,15 @@ Respond with this exact JSON format:
             model: 'ollama-reasoning',
             modelName: this.modelName,
             responseTime,
-            thinkTime,
-            rawResponse: rawResponse.substring(0, 800),
-            thinkContent: thinkContent.substring(0, 300),
+            thinkingTime,
+            rawResponse: rawResponse,
+            thinkingContent: thinkingContent.substring(0, 300),
             timestamp: new Date().toISOString(),
             parseMethod
         };
     }
 
-    updateStats(result, responseTime, thinkTime = 0) {
+    updateStats(result, responseTime, thinkingTime = 0) {
         this.stats.totalAnalyzed++;
 
         switch (result.decision) {
@@ -641,8 +679,8 @@ Respond with this exact JSON format:
         this.stats.averageResponseTime =
             (this.stats.averageResponseTime * (this.stats.totalAnalyzed - 1) + responseTime) / this.stats.totalAnalyzed;
 
-        this.stats.averagethinkTime =
-            (this.stats.averagethinkTime * (this.stats.totalAnalyzed - 1) + thinkTime) / this.stats.totalAnalyzed;
+        this.stats.averageThinkingTime =
+            (this.stats.averageThinkingTime * (this.stats.totalAnalyzed - 1) + thinkingTime) / this.stats.totalAnalyzed;
     }
 
     async testConnection() {
@@ -671,15 +709,14 @@ Respond with this exact JSON format:
                 ollamaHost: this.ollamaHost,
                 features: {
                     reasoningSupport: true,
-                    thinkDisplay: this.enablethinkDisplay,
-                    streamingResponse: true,
+                    thinkingDisplay: this.enableThinkingDisplay,
+                    streamingRemoved: true,
                     enhancedPrompting: true
                 },
                 optimizations: {
                     cpuThreads: this.numThread,
                     contextSize: this.numCtx,
-                    maxTokens: this.maxTokens,
-                    typewriterDelay: this.typewriterDelay
+                    maxTokens: this.maxTokens
                 },
                 testTime,
                 testResult: {
@@ -687,8 +724,8 @@ Respond with this exact JSON format:
                     confidence: testResult.confidence,
                     explanation: testResult.explanation,
                     responseTime: testResult.responseTime,
-                    thinkTime: testResult.thinkTime,
-                    hasthink: testResult.thinkContent?.length > 0
+                    thinkingTime: testResult.thinkingTime,
+                    hasThinking: testResult.thinkingContent?.length > 0
                 },
                 stats: this.getStats()
             };
@@ -709,10 +746,10 @@ Respond with this exact JSON format:
                     ],
                     features: [
                         'Enhanced reasoning with <think> tags',
-                        'Real-time think display with typewriter effect',
+                        'Final thinking display (no streaming)',
                         'Improved uncertainty handling',
-                        'Streaming response support',
-                        'Optimized prompting for reasoning models'
+                        'Speed-optimized prompting',
+                        'Multiple reasoning modes (fast/balanced/thorough)'
                     ]
                 }
             };
@@ -727,8 +764,8 @@ Respond with this exact JSON format:
             ollamaHost: this.ollamaHost,
             features: {
                 reasoningSupport: true,
-                thinkDisplay: this.enablethinkDisplay,
-                streamingResponse: true
+                thinkingDisplay: this.enableThinkingDisplay,
+                streamingResponse: false
             },
             initialized: this.isInitialized,
             totalAnalyzed: total,
@@ -736,7 +773,7 @@ Respond with this exact JSON format:
             maliciousCount: this.stats.maliciousCount,
             uncertainCount: this.stats.uncertainCount,
             averageResponseTime: Math.round(this.stats.averageResponseTime),
-            averagethinkTime: Math.round(this.stats.averagethinkTime),
+            averageThinkingTime: Math.round(this.stats.averageThinkingTime),
             distributionPercent: {
                 benign: total > 0 ? ((this.stats.benignCount / total) * 100).toFixed(1) : '0.0',
                 malicious: total > 0 ? ((this.stats.maliciousCount / total) * 100).toFixed(1) : '0.0',
@@ -756,7 +793,7 @@ Respond with this exact JSON format:
             maliciousCount: 0,
             uncertainCount: 0,
             averageResponseTime: 0,
-            averagethinkTime: 0,
+            averageThinkingTime: 0,
             initializationTime: this.stats.initializationTime
         };
         console.log('Reasoning model statistics reset');
@@ -769,7 +806,7 @@ Respond with this exact JSON format:
             ollamaHost: this.ollamaHost,
             capabilities: {
                 reasoning: true,
-                think: true,
+                thinking: true,
                 streaming: true,
                 uncertainty: true
             },
