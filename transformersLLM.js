@@ -1,34 +1,28 @@
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { cpus } from 'os';
+import { spawn } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /**
- * TransformersLLM - Optimized Ollama-powered Security Analyzer with Reasoning Support
- * Enhanced for reasoning models with thinking tag handling and real-time display
+ * TransformersLLM - Curl-based Ollama Security Analyzer
+ * Optimized for small models with better parsing
  */
 class TransformersLLM {
     constructor(options = {}) {
-        // Ollama configuration - optimized for CPU
-        this.ollamaHost = options.ollamaHost || 'http://localhost:11434';
+        // Ollama configuration
+        this.ollamaHost = options.ollamaHost || process.env.OLLAMA_HOST;
+        this.modelName = options.modelName || 'phi3.5:3.8b';
 
-        // Use faster model for speed - consider switching to smaller reasoning model
-        this.modelName = options.modelName || 'qwen3:1.7b'; // Smaller model for speed
+        // Optimized parameters for small model
+        this.temperature = 0.0; // More deterministic
+        this.maxTokens = 200;    // Shorter responses
+        this.topP = 0.9;        // Focus on likely tokens
 
-        // Optimized parameters for fast reasoning
-        this.temperature = options.temperature || 0.1; // Lower for faster, more focused reasoning
-        this.maxTokens = options.maxTokens || 500; // Reduced for faster responses
-        this.numCtx = options.numCtx || 2048; // Smaller context for speed
-        this.reasoningMode = options.reasoningMode || 'fast'; // 'fast', 'balanced', 'thorough'
-
-        // CPU optimization settings - ES module compatible
+        // CPU optimization
         this.numThread = options.numThread || this.getOptimalThreadCount();
-        this.numGpu = 0; // Force CPU-only
-
-        // Thinking display settings - simplified
-        this.enableThinkingDisplay = options.enableThinkingDisplay !== false;
 
         // Runtime state
         this.isInitialized = false;
@@ -41,29 +35,17 @@ class TransformersLLM {
             benignCount: 0,
             maliciousCount: 0,
             uncertainCount: 0,
+            parseFailures: 0,
             averageResponseTime: 0,
-            averageThinkingTime: 0,
-            initializationTime: null
+            initializationTime: null,
+            networkErrors: 0,
+            timeouts: 0
         };
 
-        console.log(`TransformersLLM initializing with reasoning model support`);
+        console.log(`TransformersLLM initializing with curl (optimized for small model)`);
         console.log(`Ollama host: ${this.ollamaHost}`);
-        console.log(`Model: ${this.modelName} (speed optimized)`);
-        console.log(`Reasoning mode: ${this.reasoningMode}`);
+        console.log(`Model: ${this.modelName} (minimal config)`);
         console.log(`CPU threads: ${this.numThread}`);
-        console.log(`Max tokens: ${this.maxTokens} (reduced for speed)`);
-        console.log(`Thinking display: ${this.enableThinkingDisplay ? 'enabled' : 'disabled'}`);
-    }
-
-    /**
-     * Display final thinking content (no streaming)
-     */
-    displayThinking(thinkingText) {
-        if (!this.enableThinkingDisplay || !thinkingText) return;
-
-        console.log('\n[THINKING]');
-        console.log(thinkingText.replace(/<\/?think>/g, '').trim());
-        console.log('[THINKING COMPLETE]');
     }
 
     /**
@@ -72,24 +54,9 @@ class TransformersLLM {
     getOptimalThreadCount() {
         try {
             const cpuCount = cpus().length;
-            const halfCores = Math.max(1, Math.floor(cpuCount / 2));
-
-            let optimalThreads;
-            if (cpuCount <= 2) {
-                optimalThreads = 1;
-            } else if (cpuCount <= 4) {
-                optimalThreads = 2;
-            } else if (cpuCount <= 8) {
-                optimalThreads = Math.min(4, halfCores);
-            } else if (cpuCount <= 16) {
-                optimalThreads = Math.min(6, halfCores);
-            } else {
-                optimalThreads = Math.min(8, halfCores);
-            }
-
-            console.log(`CPU detection: ${cpuCount} cores detected, using ${optimalThreads} threads for inference`);
+            const optimalThreads = Math.max(1, Math.min(4, Math.floor(cpuCount / 2)));
+            console.log(`CPU detection: ${cpuCount} cores detected, using ${optimalThreads} threads`);
             return optimalThreads;
-
         } catch (error) {
             console.warn('Could not detect CPU count, defaulting to 2 threads:', error.message);
             return 2;
@@ -97,37 +64,103 @@ class TransformersLLM {
     }
 
     /**
-     * Check if Ollama is running and accessible
+     * Execute curl command and return parsed response
+     */
+    async executeCurl(endpoint, method = 'GET', data = null, timeout = 120) {
+        return new Promise((resolve, reject) => {
+            const url = `${this.ollamaHost}${endpoint}`;
+
+            const curlArgs = [
+                '-s', // Silent
+                '-X', method,
+                '--connect-timeout', '10',
+                '--max-time', timeout.toString(),
+                '-H', 'Content-Type: application/json',
+                '-H', 'Accept: application/json'
+            ];
+
+            if (data) {
+                curlArgs.push('-d', JSON.stringify(data));
+            }
+
+            curlArgs.push(url);
+
+            console.log(`[CURL] ${method} ${url}`);
+            if (data) {
+                console.log(`[CURL] Data: ${JSON.stringify(data).substring(0, 100)}...`);
+            }
+
+            const curl = spawn('curl', curlArgs);
+
+            let output = '';
+            let error = '';
+
+            curl.stdout.on('data', (chunk) => {
+                output += chunk.toString();
+            });
+
+            curl.stderr.on('data', (chunk) => {
+                error += chunk.toString();
+            });
+
+            curl.on('close', (code) => {
+                if (code === 0) {
+                    try {
+                        const result = output.trim() ? JSON.parse(output) : {};
+                        resolve(result);
+                    } catch (parseError) {
+                        resolve({ rawOutput: output, parseError: parseError.message });
+                    }
+                } else {
+                    reject(new Error(`Curl failed with code ${code}: ${error}`));
+                }
+            });
+
+            curl.on('error', (err) => {
+                reject(new Error(`Curl execution error: ${err.message}`));
+            });
+        });
+    }
+
+    /**
+     * Check Ollama status using curl
      */
     async checkOllamaStatus() {
         try {
-            const response = await fetch(`${this.ollamaHost}/api/version`);
-            if (response.ok) {
-                const data = await response.json();
-                console.log(`✓ Ollama available, version: ${data.version || 'unknown'}`);
+            console.log(`Checking Ollama status...`);
+
+            const response = await this.executeCurl('/api/version', 'GET', null, 10);
+
+            if (response.version) {
+                console.log(`✓ Ollama available, version: ${response.version}`);
+                return true;
+            } else if (response.rawOutput) {
+                console.log(`✓ Ollama responding (non-JSON): ${response.rawOutput.substring(0, 100)}`);
                 return true;
             } else {
-                console.error(`❌ Ollama responded with status: ${response.status}`);
+                console.error(`❌ Unexpected response:`, response);
                 return false;
             }
         } catch (error) {
-            console.error(`❌ Ollama not accessible: ${error.message}`);
+            console.error(`❌ Ollama connection failed: ${error.message}`);
             return false;
         }
     }
 
     /**
-     * Check if the specified model is available in Ollama
+     * Check model availability
      */
     async checkModelAvailability() {
         try {
-            const response = await fetch(`${this.ollamaHost}/api/tags`);
-            if (!response.ok) {
-                throw new Error(`Failed to get model list: ${response.status}`);
-            }
+            console.log('Checking available models...');
+            const response = await this.executeCurl('/api/tags');
 
-            const data = await response.json();
-            const availableModels = data.models || [];
+            const availableModels = response.models || [];
+            console.log(`Found ${availableModels.length} available models`);
+
+            availableModels.forEach(model => {
+                console.log(`  - ${model.name}`);
+            });
 
             const modelExists = availableModels.some(model =>
                 model.name === this.modelName ||
@@ -139,67 +172,35 @@ class TransformersLLM {
                 return true;
             } else {
                 console.log(`❌ Model ${this.modelName} not found`);
-                console.log('Available models:', availableModels.map(m => m.name).join(', '));
                 console.log(`Attempting to pull model ${this.modelName}...`);
                 return await this.pullModel();
             }
         } catch (error) {
-            console.error(`Error checking model availability: ${error.message}`);
+            console.error(`Error checking model availability:`, error.message);
             return false;
         }
     }
 
     /**
-     * Pull the model from Ollama registry
+     * Pull model using curl
      */
     async pullModel() {
         try {
             console.log(`Pulling model ${this.modelName}... This may take a while.`);
 
-            const response = await fetch(`${this.ollamaHost}/api/pull`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    name: this.modelName
-                })
-            });
+            const response = await this.executeCurl('/api/pull', 'POST', {
+                name: this.modelName
+            }, 600); // 10 minutes timeout
 
-            if (!response.ok) {
-                throw new Error(`Failed to pull model: ${response.status}`);
+            if (response.status === 'success' || !response.error) {
+                console.log(`✓ Model ${this.modelName} pulled successfully`);
+                return true;
+            } else {
+                console.error(`Failed to pull model:`, response);
+                return false;
             }
-
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder();
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-
-                const chunk = decoder.decode(value);
-                const lines = chunk.split('\n').filter(line => line.trim());
-
-                for (const line of lines) {
-                    try {
-                        const data = JSON.parse(line);
-                        if (data.status) {
-                            console.log(`Pull progress: ${data.status}`);
-                        }
-                        if (data.error) {
-                            throw new Error(data.error);
-                        }
-                    } catch (parseError) {
-                        // Ignore JSON parse errors in streaming response
-                    }
-                }
-            }
-
-            console.log(`✓ Model ${this.modelName} pulled successfully`);
-            return true;
-
         } catch (error) {
-            console.error(`Failed to pull model: ${error.message}`);
+            console.error(`Failed to pull model:`, error.message);
             return false;
         }
     }
@@ -213,234 +214,143 @@ class TransformersLLM {
         const startTime = Date.now();
 
         try {
-            console.log('Checking Ollama availability...');
+            console.log('=== TransformersLLM Initialization ===');
+
+            console.log('Step 1: Checking Ollama availability...');
             this.ollamaAvailable = await this.checkOllamaStatus();
 
             if (!this.ollamaAvailable) {
-                throw new Error('Ollama is not running. Please start Ollama first.');
+                throw new Error(`Ollama is not accessible at ${this.ollamaHost}`);
             }
 
-            console.log('Checking model availability...');
+            console.log('Step 2: Checking model availability...');
             this.modelReady = await this.checkModelAvailability();
 
             if (!this.modelReady) {
-                throw new Error(`Model ${this.modelName} is not available and could not be pulled.`);
+                throw new Error(`Model ${this.modelName} is not available`);
             }
 
             const initTime = Date.now() - startTime;
             this.stats.initializationTime = initTime;
             this.isInitialized = true;
 
-            console.log(`TransformersLLM initialized successfully in ${initTime}ms`);
+            console.log(`✓ TransformersLLM initialized successfully in ${initTime}ms`);
+            console.log('=== Initialization Complete ===');
+
             await this.validateModel();
 
         } catch (error) {
-            console.error('TransformersLLM initialization failed:', error.message);
-            throw new Error(`Failed to initialize Ollama model: ${error.message}`);
+            console.error('=== Initialization Failed ===');
+            console.error('Error:', error.message);
+            throw error;
         }
     }
 
     async validateModel() {
         try {
-            console.log('Validating reasoning model with test prompt...');
+            console.log('Running model validation test...');
 
-            const testResult = await this.generateResponse(
-                this.buildReasoningPrompt({
-                    ip: '127.0.0.1',
-                    method: 'GET',
-                    url: '/test',
-                    queryString: '',
-                    userAgent: 'Test-Validator/1.0'
-                })
-            );
+            const testResult = await this.generateResponse('Classify: SAFE');
 
             if (testResult && testResult.trim().length > 0) {
                 console.log('✓ Model validation successful');
-                console.log('Test response preview:', testResult.substring(0, 200) + '...');
+                console.log('Test response:', testResult.trim().substring(0, 100));
             } else {
-                console.warn('Model validation produced empty response');
+                console.warn('⚠ Model validation produced empty response');
             }
 
         } catch (error) {
-            console.warn('Model validation failed:', error.message);
+            console.warn('⚠ Model validation failed:', error.message);
         }
     }
 
     /**
-     * Generate response using Ollama API without streaming
+     * Generate response using curl with optimized parameters for small model
      */
     async generateResponse(prompt, options = {}) {
+        const startTime = Date.now();
+
         try {
             const requestBody = {
                 model: this.modelName,
                 prompt: prompt,
-                stream: false, // No streaming - get complete response
+                stream: false,
                 options: {
-                    // Speed-optimized generation parameters
-                    temperature: options.temperature || this.temperature,
-                    num_predict: options.maxTokens || this.maxTokens,
-                    num_ctx: this.numCtx,
+                    temperature: this.temperature,
+                    top_p: this.topP,
+                    num_predict: this.maxTokens,
                     num_thread: this.numThread,
-                    num_gpu: this.numGpu,
-
-                    // Fast sampling for quicker responses
-                    top_p: 0.7, // More focused sampling
-                    top_k: 10,  // Smaller candidate pool for speed
-                    repeat_penalty: 1.05, // Lower penalty for speed
-
-                    // Aggressive stopping for faster completion
-                    stop: ["JSON:", "\n\n\n", "---", "<END>"]
+                    repeat_penalty: 1.1,
+                    stop: ['\n\n', 'ANALYSIS:', 'NEXT:'] // Stop tokens to prevent rambling
                 }
             };
 
-            console.log(`[GENERATE] Sending prompt (${prompt.length} chars) - non-streaming`);
+            console.log(`[GENERATE] Sending request (${prompt.length} chars)`);
 
-            const response = await fetch(`${this.ollamaHost}/api/generate`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify(requestBody),
-                signal: AbortSignal.timeout(60000) // Reduced to 20 seconds for faster responses
-            });
+            const response = await this.executeCurl('/api/generate', 'POST', requestBody, 60);
 
-            if (!response.ok) {
-                throw new Error(`Ollama API error: ${response.status} ${response.statusText}`);
+            const responseTime = Date.now() - startTime;
+
+            if (response.error) {
+                throw new Error(`Ollama error: ${response.error}`);
             }
 
-            const data = await response.json();
-            if (data.error) {
-                throw new Error(`Ollama error: ${data.error}`);
-            }
+            const generatedResponse = response.response || '';
+            console.log(`[GENERATE] Success in ${responseTime}ms`);
+            console.log(`[GENERATE] Response: "${generatedResponse.substring(0, 100)}${generatedResponse.length > 100 ? '...' : ''}"`);
 
-            const fullResponse = data.response || '';
-            console.log(`[GENERATE] Received complete response (${fullResponse.length} chars)`);
-
-            // Extract and display thinking if present
-            const thinkMatch = fullResponse.match(/<think>([\s\S]*?)<\/think>/);
-            if (thinkMatch) {
-                this.displayThinking(thinkMatch[1]);
-            }
-
-            return fullResponse;
+            return generatedResponse;
 
         } catch (error) {
-            if (error.name === 'TimeoutError') {
-                throw new Error('Model response timeout (20s) - switching to faster mode recommended');
+            const responseTime = Date.now() - startTime;
+            console.error(`[GENERATE] Failed after ${responseTime}ms:`, error.message);
+
+            if (error.message.includes('timeout')) {
+                this.stats.timeouts++;
+            } else {
+                this.stats.networkErrors++;
             }
+
             throw error;
         }
     }
 
     /**
-     * Build speed-optimized reasoning prompt based on mode
+     * Highly simplified prompt optimized for small model
      */
-    buildReasoningPrompt(logEntry) {
-        const request = `${logEntry.method || 'GET'} ${logEntry.url || '/'}${logEntry.queryString ? '?' + logEntry.queryString : ''}`;
+    buildPrompt(logEntry) {
+        // Extract only essential info to avoid overwhelming small model
         const ip = logEntry.ip || 'unknown';
-        const userAgent = (logEntry.userAgent || 'unknown').substring(0, 150);
+        const method = logEntry.method || 'GET';
+        const url = (logEntry.url || '/').substring(0, 100); // Limit URL length
+        const query = (logEntry.queryString || '').substring(0, 200); // Limit query length
+        const userAgent = (logEntry.userAgent || '').substring(0, 50); // Limit UA length
 
-        // Different prompt intensities based on reasoning mode
-        if (this.reasoningMode === 'fast') {
-            return this.buildFastPrompt(request, ip, userAgent);
-        } else if (this.reasoningMode === 'balanced') {
-            return this.buildBalancedPrompt(request, ip, userAgent);
-        } else {
-            return this.buildThoroughPrompt(request, ip, userAgent);
+        // Simplify payload to just keys if it's an object
+        let payloadInfo = 'none';
+        if (logEntry.payload) {
+            if (typeof logEntry.payload === 'object') {
+                const keys = Object.keys(logEntry.payload);
+                payloadInfo = keys.length > 0 ? `${keys.length} fields: ${keys.slice(0, 3).join(', ')}` : 'empty object';
+            } else {
+                payloadInfo = String(logEntry.payload).substring(0, 100);
+            }
         }
-    }
 
-    /**
-     * Ultra-fast reasoning prompt - minimal thinking
-     */
-    buildFastPrompt(request, ip, userAgent) {
-        return `Evaluate if this web request follows normal website interaction patterns:
-Does this look like someone browsing a website normally? Quick yes/no check.
-Request: ${request}
+        // Ultra-simple prompt for small model
+        return `Security check:
 IP: ${ip}
+${method} ${url}
+Query: ${query}
 Agent: ${userAgent}
-Simple classification:
-- SAFE: Regular webpage visits, downloading files, standard API calls, typical user actions
-- THREAT: System file access, unusual paths, uncommon parameter patterns, non-web resources
-- UNCERTAIN: Could be either depending on context
+Data: ${payloadInfo}
 
-Focus only on: Does this request match how people typically interact with websites?
+Classify as exactly one word: SAFE, THREAT, or UNCERTAIN
+Then add one sentence why.
 
-Respond exactly:
-{
-  "result": "SAFE",
-  "confidence": 8,
-  "reason": "brief explanation"
-}
-JSON:`;
-    }
-
-    /**
-     * Balanced reasoning prompt - moderate thinking
-     */
-    buildBalancedPrompt(request, ip, userAgent) {
-        return `Security analysis of web request:
-
-<think>
-1. Check URL and method for obvious threats
-2. Examine parameters for injection patterns
-3. Review User-Agent for bot signatures
-4. Make classification decision
-</think>
-
-Request: ${request}
-Source: ${ip}
-User-Agent: ${userAgent}
-
-Classify as:
-- SAFE: Legitimate traffic (home, API, resources)
-- THREAT: Attack patterns (injection, traversal, scanning)
-- UNCERTAIN: Suspicious but unclear (unusual params, uncommon paths)
-
-You must respond with this exact JSON format:
-{
-  "result": "SAFE",
-  "confidence": 7,
-  "reason": "key finding"
-}
-
-JSON:`;
-    }
-
-    /**
-     * Thorough reasoning prompt - detailed thinking
-     */
-    buildThoroughPrompt(request, ip, userAgent) {
-        return `You are a cybersecurity expert analyzing web requests for threats.
-
-<think>
-Step by step analysis:
-1. Examine the HTTP method and URL path for suspicious patterns
-2. Check query parameters for injection attempts or malicious payloads  
-3. Analyze the source IP for known threat indicators
-4. Review the User-Agent for bot/scanner signatures or anomalies
-5. Consider the overall context and threat likelihood
-6. Decide on classification and confidence level
-</think>
-
-Request Details:
-- Request: ${request}
-- Source IP: ${ip}
-- User-Agent: ${userAgent}
-
-Classification Guidelines:
-- SAFE: Normal legitimate requests (home pages, static resources, standard API calls)
-- THREAT: Clear malicious activity (SQL injection, XSS, path traversal, known attack patterns)
-- UNCERTAIN: Suspicious but ambiguous (unusual parameters, uncommon paths, need more context)
-
-You must respond with this exact JSON format:
-{
-  "result": "SAFE",
-  "confidence": 8,
-  "reason": "brief explanation focusing on key indicators"
-}
-
-JSON:`;
+Response format:
+RESULT: [classification]
+REASON: [brief explanation]`;
     }
 
     async analyze(logEntry) {
@@ -449,34 +359,31 @@ JSON:`;
         }
 
         const startTime = Date.now();
-        let thinkingTime = 0;
 
         try {
-            console.log(`\n[ANALYSIS] Analyzing: ${logEntry.method || 'GET'} ${logEntry.url || '/'} from ${logEntry.ip}`);
+            console.log(`[ANALYZE] ${logEntry.method || 'GET'} ${logEntry.url || '/'} from ${logEntry.ip}`);
 
-            const prompt = this.buildReasoningPrompt(logEntry);
-
-
-            const thinkingStart = Date.now();
+            const prompt = this.buildPrompt(logEntry);
             const result = await this.generateResponse(prompt);
-            const responseTime = Date.now() - startTime;
-
-            // Calculate thinking time (approximate based on thinking tags presence)
-            if (result.includes('<think>') && result.includes('</think>')) {
-                thinkingTime = Math.max(0, responseTime - 1000); // Rough estimate
-            }
 
             if (!result || result.trim().length === 0) {
-                throw new Error('No response generated from reasoning model');
+                throw new Error('No response generated');
             }
 
-            const analysisResult = this.parseReasoningResponse(result, responseTime, thinkingTime);
-            this.updateStats(analysisResult, responseTime, thinkingTime);
+            const responseTime = Date.now() - startTime;
+            const analysisResult = this.parseResponse(result.trim(), responseTime);
+            this.updateStats(analysisResult, responseTime);
 
             return analysisResult;
 
         } catch (error) {
-            console.error('[ANALYSIS] Error:', error.message);
+            console.error('[ANALYZE] Error:', error.message);
+
+            if (error.message.includes('timeout')) {
+                this.stats.timeouts++;
+            } else {
+                this.stats.networkErrors++;
+            }
 
             return {
                 decision: 'UNCERTAIN',
@@ -485,170 +392,158 @@ JSON:`;
                 requiresSecondaryAnalysis: true,
                 tier: 'primary',
                 error: true,
-                responseTime: Date.now() - startTime,
-                thinkingTime: 0
+                responseTime: Date.now() - startTime
             };
         }
     }
 
     /**
-     * Parse response from reasoning model, handling thinking tags
+     * Robust response parsing with multiple fallback strategies
      */
-    parseReasoningResponse(rawResponse, responseTime, thinkingTime) {
-        console.log(`\n[PARSING] Processing reasoning response (${rawResponse.length} chars)`);
-        console.log(`[PARSING] Raw response: "${rawResponse}"`);
+    parseResponse(rawResponse, responseTime) {
+        console.log(`[PARSE] Raw response: "${rawResponse}"`);
 
         let decision = 'UNCERTAIN';
-        let confidence = 5;
+        let confidence = 3;
         let explanation = 'Could not parse response';
         let requiresSecondaryAnalysis = true;
-        let parseMethod = 'reasoning_json';
-        let thinkingContent = '';
+        let parseSuccess = false;
 
         try {
-            // Extract thinking content if present
-            const thinkingMatch = rawResponse.match(/<think>([\s\S]*?)<\/think>/);
-            if (thinkingMatch) {
-                thinkingContent = thinkingMatch[1].trim();
-                console.log(`[PARSING] Extracted thinking content (${thinkingContent.length} chars)`);
-            }
+            // Clean the response
+            const cleanResponse = rawResponse.trim().replace(/\s+/g, ' ');
+            const upperResponse = cleanResponse.toUpperCase();
 
-            // Remove thinking tags and extract JSON
-            let cleanResponse = rawResponse
-                .replace(/<think>[\s\S]*?<\/think>/g, '')
-                .replace(/<\/?think>/g, '')
-                .trim();
+            // Strategy 1: Look for structured RESULT: format
+            const resultMatch = cleanResponse.match(/RESULT:\s*(SAFE|THREAT|UNCERTAIN)/i);
+            const reasonMatch = cleanResponse.match(/REASON:\s*(.+?)(?:\n|$)/is);
 
-            console.log(`[PARSING] Clean response after removing thinking: "${cleanResponse}"`);
+            if (resultMatch) {
+                const result = resultMatch[1].toUpperCase();
+                parseSuccess = true;
+                confidence = 8;
 
-            // More aggressive JSON extraction - look for any JSON pattern
-            let jsonMatch = cleanResponse.match(/\{[\s\S]*?\}/);
-
-            // If no complete JSON, try to find JSON starting with {
-            if (!jsonMatch) {
-                console.log('[PARSING] No complete JSON found, looking for partial JSON...');
-
-                // Look for JSON starting pattern
-                const jsonStart = cleanResponse.indexOf('{');
-                if (jsonStart !== -1) {
-                    let potentialJson = cleanResponse.substring(jsonStart);
-
-                    // Try to complete the JSON if it seems truncated
-                    if (!potentialJson.includes('}')) {
-                        // Try to construct basic JSON from content
-                        if (cleanResponse.includes('SAFE') || cleanResponse.includes('safe')) {
-                            potentialJson = '{"result": "SAFE", "confidence": 7, "reason": "appears safe"}';
-                        } else if (cleanResponse.includes('THREAT') || cleanResponse.includes('threat') || cleanResponse.includes('malicious')) {
-                            potentialJson = '{"result": "THREAT", "confidence": 7, "reason": "threat detected"}';
-                        } else {
-                            potentialJson = '{"result": "UNCERTAIN", "confidence": 5, "reason": "needs review"}';
-                        }
-                    }
-
-                    jsonMatch = [potentialJson];
-                    console.log(`[PARSING] Constructed/found JSON: "${jsonMatch[0]}"`);
-                }
-            }
-
-            if (!jsonMatch) {
-                throw new Error('No JSON found in response');
-            }
-
-            let jsonStr = jsonMatch[0].trim();
-            console.log(`[PARSING] Extracted JSON: ${jsonStr}`);
-
-            // Parse JSON
-            let parsedData;
-            try {
-                parsedData = JSON.parse(jsonStr);
-                console.log(`[PARSING] Successfully parsed JSON:`, parsedData);
-            } catch (jsonError) {
-                console.log(`[PARSING] JSON parse failed, attempting to fix: ${jsonError.message}`);
-
-                // Try to fix common JSON issues
-                let fixedJson = jsonStr
-                    .replace(/'/g, '"')  // Replace single quotes
-                    .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":')  // Quote keys
-                    .replace(/:\s*([^",\{\[\d\s][^",\}\]]*)\s*([,\}])/g, ': "$1"$2')  // Quote string values
-                    .replace(/,\s*}/g, '}')  // Remove trailing commas
-                    .replace(/,\s*]/g, ']');
-
-                console.log(`[PARSING] Fixed JSON attempt: "${fixedJson}"`);
-                parsedData = JSON.parse(fixedJson);
-                parseMethod = 'reasoning_json_fixed';
-            }
-
-            // Extract values from parsed JSON
-            if (parsedData && typeof parsedData === 'object') {
-                // Map result to our decision format
-                if (parsedData.result) {
-                    const result = parsedData.result.toString().toUpperCase();
-                    console.log(`[PARSING] Found result: "${result}"`);
-
-                    if (result === 'SAFE') {
+                switch (result) {
+                    case 'SAFE':
                         decision = 'BENIGN';
                         requiresSecondaryAnalysis = false;
-                    } else if (result === 'THREAT') {
+                        break;
+                    case 'THREAT':
                         decision = 'MALICIOUS';
                         requiresSecondaryAnalysis = false;
-                    } else if (result === 'UNCERTAIN') {
+                        break;
+                    case 'UNCERTAIN':
                         decision = 'UNCERTAIN';
                         requiresSecondaryAnalysis = true;
-                    }
+                        break;
                 }
 
-                // Extract confidence
-                if (parsedData.confidence !== undefined) {
-                    const conf = parseInt(parsedData.confidence);
-                    if (!isNaN(conf)) {
-                        confidence = Math.min(10, Math.max(1, conf));
-                    }
+                if (reasonMatch) {
+                    explanation = reasonMatch[1].trim();
                 }
+            }
+            // Strategy 2: Look for keywords at start of response
+            else if (/^(SAFE|BENIGN|NORMAL|OK)/i.test(cleanResponse)) {
+                decision = 'BENIGN';
+                confidence = 6;
+                explanation = 'Safe request identified';
+                requiresSecondaryAnalysis = false;
+                parseSuccess = true;
+            }
+            else if (/^(THREAT|MALICIOUS|ATTACK|DANGEROUS|EXPLOIT)/i.test(cleanResponse)) {
+                decision = 'MALICIOUS';
+                confidence = 6;
+                explanation = 'Threat indicators found';
+                requiresSecondaryAnalysis = false;
+                parseSuccess = true;
+            }
+            else if (/^(UNCERTAIN|UNKNOWN|UNCLEAR|MAYBE)/i.test(cleanResponse)) {
+                decision = 'UNCERTAIN';
+                confidence = 6;
+                explanation = 'Requires further analysis';
+                requiresSecondaryAnalysis = true;
+                parseSuccess = true;
+            }
+            // Strategy 3: Keyword presence anywhere in response
+            else {
+                const keywords = {
+                    safe: ['SAFE', 'BENIGN', 'NORMAL', 'LEGITIMATE', 'CLEAN', 'OK'],
+                    threat: ['THREAT', 'MALICIOUS', 'ATTACK', 'EXPLOIT', 'INJECTION', 'XSS', 'SQL', 'DANGEROUS'],
+                    uncertain: ['UNCERTAIN', 'UNKNOWN', 'UNCLEAR', 'SUSPICIOUS', 'MAYBE', 'POSSIBLE']
+                };
 
-                // Extract reason
-                if (parsedData.reason && typeof parsedData.reason === 'string') {
-                    explanation = parsedData.reason.trim();
+                let safeScore = 0;
+                let threatScore = 0;
+                let uncertainScore = 0;
 
-                    // Clean up explanation
-                    if (explanation.length > 250) {
-                        const truncated = explanation.substring(0, 250);
-                        const lastPeriod = truncated.lastIndexOf('.');
-                        explanation = lastPeriod > 50 ? truncated.substring(0, lastPeriod + 1) : truncated + '...';
-                    }
+                // Count keyword matches
+                keywords.safe.forEach(word => {
+                    if (upperResponse.includes(word)) safeScore++;
+                });
+                keywords.threat.forEach(word => {
+                    if (upperResponse.includes(word)) threatScore++;
+                });
+                keywords.uncertain.forEach(word => {
+                    if (upperResponse.includes(word)) uncertainScore++;
+                });
+
+                console.log(`[PARSE] Keyword scores - Safe: ${safeScore}, Threat: ${threatScore}, Uncertain: ${uncertainScore}`);
+
+                if (threatScore > 0 && threatScore >= safeScore) {
+                    decision = 'MALICIOUS';
+                    confidence = Math.min(7, 3 + threatScore);
+                    explanation = 'Threat keywords detected';
+                    requiresSecondaryAnalysis = false;
+                    parseSuccess = true;
+                } else if (safeScore > 0 && safeScore > threatScore) {
+                    decision = 'BENIGN';
+                    confidence = Math.min(7, 3 + safeScore);
+                    explanation = 'Safe keywords detected';
+                    requiresSecondaryAnalysis = false;
+                    parseSuccess = true;
+                } else if (uncertainScore > 0) {
+                    decision = 'UNCERTAIN';
+                    confidence = Math.min(6, 3 + uncertainScore);
+                    explanation = 'Uncertain classification';
+                    requiresSecondaryAnalysis = true;
+                    parseSuccess = true;
                 }
+            }
 
-                console.log(`[PARSING] Final extracted values: result=${decision}, confidence=${confidence}, reason="${explanation}"`);
+            // Strategy 4: Length-based fallback for very short responses
+            if (!parseSuccess && cleanResponse.length < 10) {
+                decision = 'UNCERTAIN';
+                confidence = 2;
+                explanation = 'Response too short to analyze';
+                requiresSecondaryAnalysis = true;
+                console.log('[PARSE] Using short response fallback');
             }
 
         } catch (parseError) {
-            console.error('[PARSING] All JSON parse attempts failed:', parseError.message);
-            parseMethod = 'reasoning_fallback';
-
-            // Enhanced fallback to text analysis
-            const upperResponse = rawResponse.toUpperCase();
-            console.log(`[PARSING] Using text fallback analysis on: "${upperResponse.substring(0, 100)}..."`);
-
-            if (upperResponse.includes('SAFE') || upperResponse.includes('BENIGN') || upperResponse.includes('LEGITIMATE') ||
-                upperResponse.includes('NORMAL') || upperResponse.includes('OK')) {
-                decision = 'BENIGN';
-                confidence = 6;
-                explanation = 'Identified as safe through text analysis';
-                requiresSecondaryAnalysis = false;
-            } else if (upperResponse.includes('THREAT') || upperResponse.includes('MALICIOUS') || upperResponse.includes('ATTACK') ||
-                upperResponse.includes('INJECTION') || upperResponse.includes('EXPLOIT')) {
-                decision = 'MALICIOUS';
-                confidence = 6;
-                explanation = 'Threat indicators found in analysis';
-                requiresSecondaryAnalysis = false;
-            } else {
-                decision = 'UNCERTAIN';
-                confidence = 4;
-                explanation = 'Response parsing failed - requires review';
-                requiresSecondaryAnalysis = true;
-            }
+            console.error('[PARSE] Error:', parseError.message);
+            this.stats.parseFailures++;
         }
 
-        console.log(`[PARSING] Final result: ${decision} (confidence: ${confidence}) - "${explanation}"`);
+        // Ensure explanation exists and is reasonable length
+        if (!explanation || explanation.length < 3) {
+            explanation = decision === 'MALICIOUS' ? 'Threat detected' :
+                decision === 'BENIGN' ? 'Normal request' : 'Needs analysis';
+        }
+
+        // Clean explanation
+        explanation = explanation.replace(/[^\w\s\-\.,!?]/g, '').trim();
+
+
+        if (!parseSuccess) {
+            this.stats.parseFailures++;
+            console.warn('[PARSE] Failed to parse response properly, using fallback');
+        }
+
+        console.log(`[PARSE] Final result:`);
+        console.log(`  Decision: "${decision}"`);
+        console.log(`  Confidence: ${confidence}/10`);
+        console.log(`  Explanation: "${explanation}"`);
+        console.log(`  Parse success: ${parseSuccess}`);
 
         return {
             decision,
@@ -656,18 +551,16 @@ JSON:`;
             explanation,
             requiresSecondaryAnalysis,
             tier: 'primary',
-            model: 'ollama-reasoning',
+            model: 'ollama-curl',
             modelName: this.modelName,
             responseTime,
-            thinkingTime,
             rawResponse: rawResponse,
-            thinkingContent: thinkingContent.substring(0, 300),
             timestamp: new Date().toISOString(),
-            parseMethod
+            parseSuccess
         };
     }
 
-    updateStats(result, responseTime, thinkingTime = 0) {
+    updateStats(result, responseTime) {
         this.stats.totalAnalyzed++;
 
         switch (result.decision) {
@@ -678,45 +571,48 @@ JSON:`;
 
         this.stats.averageResponseTime =
             (this.stats.averageResponseTime * (this.stats.totalAnalyzed - 1) + responseTime) / this.stats.totalAnalyzed;
-
-        this.stats.averageThinkingTime =
-            (this.stats.averageThinkingTime * (this.stats.totalAnalyzed - 1) + thinkingTime) / this.stats.totalAnalyzed;
     }
 
+    /**
+     * Test connection with simplified prompt
+     */
     async testConnection() {
         try {
+            console.log('=== Connection Test Starting ===');
+
             if (!this.isInitialized) {
+                console.log('Initializing for connection test...');
                 await this.initialize();
             }
 
             const testStart = Date.now();
 
+            // Use simple test case
             const testResult = await this.analyze({
                 ip: '192.168.1.100',
                 method: 'GET',
-                url: '/api/test',
-                queryString: 'param=value',
-                userAgent: 'Test-Browser/2.0'
+                url: '/home',
+                queryString: '',
+                userAgent: 'Mozilla/5.0'
             });
 
             const testTime = Date.now() - testStart;
 
+            console.log('=== Connection Test Successful ===');
+
             return {
                 success: true,
-                message: 'Reasoning model connection successful',
-                model: 'ollama-reasoning',
+                message: 'Curl-based connection successful',
+                model: 'ollama-curl',
                 modelName: this.modelName,
                 ollamaHost: this.ollamaHost,
-                features: {
-                    reasoningSupport: true,
-                    thinkingDisplay: this.enableThinkingDisplay,
-                    streamingRemoved: true,
-                    enhancedPrompting: true
-                },
+                httpClient: 'curl',
                 optimizations: {
                     cpuThreads: this.numThread,
-                    contextSize: this.numCtx,
-                    maxTokens: this.maxTokens
+                    shortPrompts: true,
+                    lowTemperature: true,
+                    shortResponses: true,
+                    stopTokens: true
                 },
                 testTime,
                 testResult: {
@@ -724,108 +620,417 @@ JSON:`;
                     confidence: testResult.confidence,
                     explanation: testResult.explanation,
                     responseTime: testResult.responseTime,
-                    thinkingTime: testResult.thinkingTime,
-                    hasThinking: testResult.thinkingContent?.length > 0
+                    parseSuccess: testResult.parseSuccess
                 },
                 stats: this.getStats()
             };
 
         } catch (error) {
+            console.error('=== Connection Test Failed ===');
+            console.error('Error details:', error);
+
             return {
                 success: false,
-                message: `Reasoning model connection failed: ${error.message}`,
-                model: 'ollama-reasoning',
+                message: `Connection failed: ${error.message}`,
+                model: 'ollama-curl',
                 modelName: this.modelName,
+                ollamaHost: this.ollamaHost,
+                httpClient: 'curl',
                 error: error.message,
-                troubleshooting: {
-                    steps: [
-                        '1. Install Ollama: curl -fsSL https://ollama.ai/install.sh | sh',
-                        '2. Start Ollama: ollama serve',
-                        '3. Pull reasoning model: ollama pull qwen2.5-coder:7b',
-                        '4. Verify: ollama list'
-                    ],
-                    features: [
-                        'Enhanced reasoning with <think> tags',
-                        'Final thinking display (no streaming)',
-                        'Improved uncertainty handling',
-                        'Speed-optimized prompting',
-                        'Multiple reasoning modes (fast/balanced/thorough)'
-                    ]
-                }
+                troubleshooting: [
+                    '1. Check if Ollama is running: systemctl status ollama',
+                    '2. Test connectivity: curl http://parrot.tail3f550b.ts.net:11434/api/version',
+                    '3. Verify curl is installed and accessible',
+                    '4. Check network connectivity and firewall',
+                    '5. Try simpler model like llama3.2:1b'
+                ]
             };
         }
     }
 
     getStats() {
         const total = this.stats.totalAnalyzed;
+        const parseSuccessRate = total > 0 ? ((total - this.stats.parseFailures) / total * 100).toFixed(1) : '0.0';
+
         return {
-            model: 'ollama-reasoning',
+            model: 'ollama-curl',
             modelName: this.modelName,
             ollamaHost: this.ollamaHost,
-            features: {
-                reasoningSupport: true,
-                thinkingDisplay: this.enableThinkingDisplay,
-                streamingResponse: false
+            httpClient: 'curl',
+            optimizations: {
+                cpuThreads: this.numThread,
+                shortPrompts: true,
+                lowTemperature: true,
+                shortResponses: true,
+                stopTokens: true
             },
             initialized: this.isInitialized,
+            ollamaAvailable: this.ollamaAvailable,
+            modelReady: this.modelReady,
+            initializationTime: this.stats.initializationTime,
             totalAnalyzed: total,
             benignCount: this.stats.benignCount,
             maliciousCount: this.stats.maliciousCount,
             uncertainCount: this.stats.uncertainCount,
-            averageResponseTime: Math.round(this.stats.averageResponseTime),
-            averageThinkingTime: Math.round(this.stats.averageThinkingTime),
-            distributionPercent: {
-                benign: total > 0 ? ((this.stats.benignCount / total) * 100).toFixed(1) : '0.0',
-                malicious: total > 0 ? ((this.stats.maliciousCount / total) * 100).toFixed(1) : '0.0',
-                uncertain: total > 0 ? ((this.stats.uncertainCount / total) * 100).toFixed(1) : '0.0'
-            },
-            performanceMetrics: {
-                primaryResolutionRate: total > 0 ? (((total - this.stats.uncertainCount) / total) * 100).toFixed(1) + '%' : '0.0%',
-                escalationRate: total > 0 ? ((this.stats.uncertainCount / total) * 100).toFixed(1) + '%' : '0.0%'
-            }
+            parseFailures: this.stats.parseFailures,
+            parseSuccessRate: parseSuccessRate + '%',
+            networkErrors: this.stats.networkErrors,
+            timeouts: this.stats.timeouts,
+            benignPercent: total > 0 ? ((this.stats.benignCount / total) * 100).toFixed(1) : '0.0',
+            maliciousPercent: total > 0 ? ((this.stats.maliciousCount / total) * 100).toFixed(1) : '0.0',
+            uncertainPercent: total > 0 ? ((this.stats.uncertainCount / total) * 100).toFixed(1) : '0.0',
+            averageResponseTime: Math.round(this.stats.averageResponseTime)
         };
     }
 
     resetStats() {
+        const initTime = this.stats.initializationTime;
         this.stats = {
             totalAnalyzed: 0,
             benignCount: 0,
             maliciousCount: 0,
             uncertainCount: 0,
+            parseFailures: 0,
             averageResponseTime: 0,
-            averageThinkingTime: 0,
-            initializationTime: this.stats.initializationTime
+            initializationTime: initTime,
+            networkErrors: 0,
+            timeouts: 0
         };
-        console.log('Reasoning model statistics reset');
+        console.log('Statistics reset');
     }
 
     getModelInfo() {
         return {
-            model: 'ollama-reasoning',
+            model: 'ollama-curl',
             modelName: this.modelName,
             ollamaHost: this.ollamaHost,
-            capabilities: {
-                reasoning: true,
-                thinking: true,
-                streaming: true,
-                uncertainty: true
+            httpClient: 'curl',
+            optimizations: {
+                cpuThreads: this.numThread,
+                shortPrompts: true,
+                lowTemperature: true,
+                shortResponses: true,
+                stopTokens: true
             },
-            initialized: this.isInitialized
+            initialized: this.isInitialized,
+            ollamaAvailable: this.ollamaAvailable,
+            modelReady: this.modelReady
         };
     }
 
     clearHistory() {
-        console.log('Ollama reasoning model is stateless - no history to clear');
+        console.log('Ollama is stateless - no history to clear');
     }
 
     async dispose() {
         try {
-            console.log('Disposing reasoning model resources...');
+            console.log('Disposing TransformersLLM resources...');
             this.isInitialized = false;
-            console.log('Reasoning model disposed successfully');
+            console.log('TransformersLLM disposed successfully');
         } catch (error) {
             console.warn('Error during disposal:', error.message);
         }
+    }
+
+    /**
+     * Enhanced diagnostics with parsing tests
+     */
+    async diagnoseConnection() {
+        console.log('=== Network Diagnostics (Curl) ===');
+
+        const diagnostics = {
+            timestamp: new Date().toISOString(),
+            host: this.ollamaHost,
+            httpClient: 'curl',
+            tests: []
+        };
+
+        // Test 1: Basic connectivity
+        try {
+            console.log('Testing basic connectivity...');
+            const response = await this.executeCurl('/api/version', 'GET', null, 10);
+            diagnostics.tests.push({
+                name: 'Basic Connectivity',
+                status: 'PASS',
+                details: `Ollama version: ${response.version || 'detected'}`
+            });
+        } catch (error) {
+            diagnostics.tests.push({
+                name: 'Basic Connectivity',
+                status: 'FAIL',
+                details: error.message,
+                suggestion: 'Check if Ollama is running and accessible'
+            });
+        }
+
+        // Test 2: Model list
+        try {
+            console.log('Testing model list endpoint...');
+            const response = await this.executeCurl('/api/tags', 'GET', null, 15);
+            const models = response.models || [];
+            diagnostics.tests.push({
+                name: 'Model List',
+                status: 'PASS',
+                details: `Found ${models.length} models`
+            });
+        } catch (error) {
+            diagnostics.tests.push({
+                name: 'Model List',
+                status: 'FAIL',
+                details: error.message
+            });
+        }
+
+        // Test 3: Parsing test with known responses
+        try {
+            console.log('Testing response parsing...');
+
+            const testCases = [
+                'RESULT: SAFE\nREASON: Normal request',
+                'RESULT: THREAT\nREASON: SQL injection detected',
+                'RESULT: UNCERTAIN\nREASON: Needs more analysis',
+                'SAFE - looks normal',
+                'THREAT detected',
+                'UNCERTAIN classification'
+            ];
+
+            let parseSuccesses = 0;
+            for (const testCase of testCases) {
+                const parsed = this.parseResponse(testCase, 100);
+                if (parsed.parseSuccess || parsed.decision !== 'UNCERTAIN' || testCase.includes('UNCERTAIN')) {
+                    parseSuccesses++;
+                }
+            }
+
+            diagnostics.tests.push({
+                name: 'Response Parsing',
+                status: parseSuccesses >= 4 ? 'PASS' : 'PARTIAL',
+                details: `${parseSuccesses}/${testCases.length} test cases parsed correctly`
+            });
+
+        } catch (error) {
+            diagnostics.tests.push({
+                name: 'Response Parsing',
+                status: 'FAIL',
+                details: error.message
+            });
+        }
+
+        // Test 4: Quick generation with simple prompt
+        try {
+            console.log('Testing quick generation...');
+            const response = await this.executeCurl('/api/generate', 'POST', {
+                model: this.modelName,
+                prompt: 'Classify this as: SAFE, THREAT, or UNCERTAIN\nRequest: GET /home\nClassify:',
+                stream: false,
+                options: {
+                    temperature: 0.0,
+                    num_predict: 20,
+                    stop: ['\n']
+                }
+            }, 30);
+
+            const result = response.response || '';
+            diagnostics.tests.push({
+                name: 'Quick Generation',
+                status: 'PASS',
+                details: `Response: "${result.substring(0, 50)}${result.length > 50 ? '...' : ''}"`
+            });
+        } catch (error) {
+            diagnostics.tests.push({
+                name: 'Quick Generation',
+                status: 'FAIL',
+                details: error.message
+            });
+        }
+
+        console.log('=== Diagnostic Results ===');
+        diagnostics.tests.forEach(test => {
+            console.log(`${test.status === 'PASS' ? '✓' : test.status === 'PARTIAL' ? '⚠' : '❌'} ${test.name}: ${test.details}`);
+            if (test.suggestion) {
+                console.log(`   Suggestion: ${test.suggestion}`);
+            }
+        });
+
+        return diagnostics;
+    }
+
+    /**
+     * Run calibration tests to improve parsing
+     */
+    async runCalibrationTests() {
+        console.log('=== Running Calibration Tests ===');
+
+        const testCases = [
+            {
+                name: 'Normal Request',
+                logEntry: { ip: '192.168.1.1', method: 'GET', url: '/home', queryString: '', userAgent: 'Mozilla/5.0' },
+                expected: 'BENIGN'
+            },
+            {
+                name: 'SQL Injection',
+                logEntry: { ip: '10.0.0.1', method: 'GET', url: '/search', queryString: "q=' OR 1=1--", userAgent: 'curl/7.68.0' },
+                expected: 'MALICIOUS'
+            },
+            {
+                name: 'XSS Attempt',
+                logEntry: { ip: '172.16.0.1', method: 'POST', url: '/comment', payload: { text: '<script>alert(1)</script>' }, userAgent: 'Mozilla/5.0' },
+                expected: 'MALICIOUS'
+            },
+            {
+                name: 'Suspicious Pattern',
+                logEntry: { ip: '203.0.113.1', method: 'GET', url: '/admin/../../../etc/passwd', queryString: '', userAgent: 'wget/1.20.3' },
+                expected: 'MALICIOUS'
+            },
+            {
+                name: 'Ambiguous Request',
+                logEntry: { ip: '198.51.100.1', method: 'POST', url: '/api/data', payload: { action: 'delete_all' }, userAgent: 'CustomApp/1.0' },
+                expected: 'UNCERTAIN'
+            }
+        ];
+
+        const results = [];
+        let correctClassifications = 0;
+
+        for (const testCase of testCases) {
+            try {
+                console.log(`\nTesting: ${testCase.name}`);
+                const result = await this.analyze(testCase.logEntry);
+
+                const isCorrect = result.decision === testCase.expected;
+                if (isCorrect) correctClassifications++;
+
+                results.push({
+                    name: testCase.name,
+                    expected: testCase.expected,
+                    actual: result.decision,
+                    confidence: result.confidence,
+                    explanation: result.explanation,
+                    responseTime: result.responseTime,
+                    parseSuccess: result.parseSuccess,
+                    correct: isCorrect
+                });
+
+                console.log(`  Expected: ${testCase.expected}, Got: ${result.decision} (${isCorrect ? 'CORRECT' : 'INCORRECT'})`);
+                console.log(`  Confidence: ${result.confidence}/10, Parse: ${result.parseSuccess ? 'OK' : 'FAILED'}`);
+                console.log(`  Explanation: "${result.explanation}"`);
+
+                // Small delay to avoid overwhelming the model
+                await new Promise(resolve => setTimeout(resolve, 1000));
+
+            } catch (error) {
+                console.error(`  Test failed: ${error.message}`);
+                results.push({
+                    name: testCase.name,
+                    expected: testCase.expected,
+                    actual: 'ERROR',
+                    error: error.message,
+                    correct: false
+                });
+            }
+        }
+
+        const accuracy = (correctClassifications / testCases.length * 100).toFixed(1);
+
+        console.log(`\n=== Calibration Results ===`);
+        console.log(`Accuracy: ${correctClassifications}/${testCases.length} (${accuracy}%)`);
+        console.log(`Parse success rate: ${this.getStats().parseSuccessRate}`);
+
+        return {
+            accuracy: parseFloat(accuracy),
+            correctClassifications,
+            totalTests: testCases.length,
+            results,
+            recommendations: this.generateRecommendations(results)
+        };
+    }
+
+    /**
+     * Generate recommendations based on calibration results
+     */
+    generateRecommendations(results) {
+        const recommendations = [];
+
+        const parseFailures = results.filter(r => r.parseSuccess === false).length;
+        const lowConfidence = results.filter(r => r.confidence < 5).length;
+        const incorrectClassifications = results.filter(r => !r.correct).length;
+
+        if (parseFailures > 0) {
+            recommendations.push({
+                issue: 'Parse Failures',
+                count: parseFailures,
+                suggestion: 'Consider using even simpler prompts or adding more stop tokens'
+            });
+        }
+
+        if (lowConfidence > 0) {
+            recommendations.push({
+                issue: 'Low Confidence',
+                count: lowConfidence,
+                suggestion: 'Model may need more specific examples or different temperature settings'
+            });
+        }
+
+        if (incorrectClassifications > 0) {
+            recommendations.push({
+                issue: 'Incorrect Classifications',
+                count: incorrectClassifications,
+                suggestion: 'Consider fine-tuning prompt or using a larger model'
+            });
+        }
+
+        if (recommendations.length === 0) {
+            recommendations.push({
+                issue: 'Performance',
+                suggestion: 'Model performing well with current configuration'
+            });
+        }
+
+        return recommendations;
+    }
+
+    /**
+     * Batch analysis with rate limiting for small model
+     */
+    async analyzeBatch(logEntries, options = {}) {
+        const batchSize = options.batchSize || 5; // Small batches
+        const delayBetweenBatches = options.delay || 2000; // 2 second delay
+
+        console.log(`[BATCH] Analyzing ${logEntries.length} entries in batches of ${batchSize}`);
+
+        const results = [];
+
+        for (let i = 0; i < logEntries.length; i += batchSize) {
+            const batch = logEntries.slice(i, i + batchSize);
+            console.log(`[BATCH] Processing batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(logEntries.length/batchSize)}`);
+
+            const batchPromises = batch.map(entry => this.analyze(entry));
+            const batchResults = await Promise.allSettled(batchPromises);
+
+            batchResults.forEach((result, index) => {
+                if (result.status === 'fulfilled') {
+                    results.push(result.value);
+                } else {
+                    console.error(`[BATCH] Entry ${i + index} failed:`, result.reason.message);
+                    results.push({
+                        decision: 'UNCERTAIN',
+                        confidence: 0,
+                        explanation: 'Batch processing error',
+                        error: true,
+                        responseTime: 0
+                    });
+                }
+            });
+
+            // Delay between batches to avoid overwhelming small model
+            if (i + batchSize < logEntries.length) {
+                console.log(`[BATCH] Waiting ${delayBetweenBatches}ms before next batch...`);
+                await new Promise(resolve => setTimeout(resolve, delayBetweenBatches));
+            }
+        }
+
+        console.log(`[BATCH] Completed ${results.length} analyses`);
+        return results;
     }
 }
 
